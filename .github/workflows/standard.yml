@@ -1,0 +1,23 @@
+# The one workflow. Opts into org-standard behaviors; logic lives in the reusable
+# bounded-systems/.github/.github/workflows/repo-standard.yml.
+#
+# Without this the repo's tests never run on a PR, and the guards they cover are the
+# product: the wrong-feed check that keeps private issue titles off a public page, and the
+# fail-closed paths that make an unreadable board say so instead of rendering an empty one.
+# A deploy lane alone does not cover them — it is dispatch-only, and by the time it runs the
+# change is already merged.
+name: standard
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  standard:
+    uses: bounded-systems/.github/.github/workflows/repo-standard.yml@d43c3280588ef05f4ead43426db1091d4cb8f520
+    with:
+      security: true
+      test: true
+      runtime: node
+      test-command: "node --test test/*.test.mjs"
