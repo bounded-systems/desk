@@ -16,8 +16,21 @@ name: deploy
 # DISPATCH-ONLY, deliberately. A push-triggered deploy of a public read surface would put
 # the approval gate on every merge, and the gate is what makes the account-wide
 # Workers:Edit mint safe.
+#
+# THE GATE IS A FACE ID CEREMONY, not a comment (infra#480): the run opens a ceremony
+# whose challenge pins THIS run on THIS commit, notifies the approver with the approve
+# URL, polls for the authorization, and redeems it — fail closed — before any credential
+# is minted. break_glass keeps the retired comment gate solely for a keeper that cannot
+# serve a ceremony, and brands the run summary when used.
 on:
   workflow_dispatch:
+    inputs:
+      break_glass:
+        description: >-
+          Fall back to the RETIRED comment-approval gate because the keeper itself cannot
+          serve a ceremony. Loud by design; do not use to skip a Face ID.
+        type: boolean
+        default: false
 
 permissions:
   id-token: write # OIDC → broker /deploy/desk
@@ -52,18 +65,116 @@ jobs:
       - name: Unit tests (tripwire)
         run: node --test test/*.test.mjs
 
-      # Human approval BEFORE the mint — no account-wide Workers:Edit token exists until a
-      # human signs off. Same composite and pin the other privileged lanes use.
-      - name: Await approval
+      # Human authorization BEFORE the mint — no account-wide Workers:Edit token exists until
+      # a Face ID has signed THIS run's digest (infra#480; the same shape as keeper-deploy in
+      # bounded-systems/infra). The keeper URL is a literal on purpose: a variable here would
+      # let configuration move the ceremony somewhere else.
+      - name: Open the Face ID ceremony
+        id: ceremony
+        if: ${{ !inputs.break_glass }}
+        env:
+          KEEPER_URL: https://keeper.bounded.tools
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          req="$(jq -nc --arg run "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" \
+            '{v:"bounded.deploy-request.v1",repo:"desk",workflow:"deploy.yml",run_id:$run,head_sha:$sha}')"
+          start="$(curl -sfS --max-time 20 -X POST -H 'content-type: application/json' \
+            -d "{\"requestType\":\"bounded.deploy-request.v1\",\"request\":$req}" \
+            "$KEEPER_URL/authorize/start")" || {
+            echo "::error::the keeper refused to open a ceremony. If keeper.bounded.tools is itself down or broken, re-dispatch with break_glass: true — and say so in the run."
+            exit 1
+          }
+          ceremony="$(jq -r '.ceremonyId // empty' <<<"$start")"
+          approve_url="$(jq -r '.approveUrl // empty' <<<"$start")"
+          [ -n "$ceremony" ] && [ -n "$approve_url" ] || { echo "::error::keeper returned no ceremony"; exit 1; }
+          echo "ceremony=$ceremony" >> "$GITHUB_OUTPUT"
+          echo "request=$req" >> "$GITHUB_OUTPUT"
+          # The issue is a NOTIFICATION, not a credential: commenting on it does
+          # nothing. The approval is the Face ID at the URL.
+          issue_url="$(gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "Face ID: approve desk deploy (run ${GITHUB_RUN_ID})" \
+            --body "$(printf 'A desk-deploy run wants to mint an account-wide Workers:Edit token and deploy the Front Desk board at desk.bounded.tools.\n\nApprove with your passkey (15-minute window):\n\n%s\n\nThis issue is a notification only — comments here authorize nothing (infra#480 retired the comment gate). Run: https://github.com/%s/actions/runs/%s' "$approve_url" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")")"
+          echo "issue_url=$issue_url" >> "$GITHUB_OUTPUT"
+          echo "ceremony open — approve at $approve_url"
+
+      - name: Wait for the Face ID, then redeem — fail closed
+        if: ${{ !inputs.break_glass }}
+        env:
+          KEEPER_URL: https://keeper.bounded.tools
+          CEREMONY: ${{ steps.ceremony.outputs.ceremony }}
+          REQ: ${{ steps.ceremony.outputs.request }}
+        run: |
+          set -euo pipefail
+          # Poll until the human approves, the ceremony expires (15 min), or the
+          # keeper says GONE. pending/gone being distinct answers is what makes
+          # this loop's failure mean "never approved", not "lost a race".
+          deadline="$(( $(date +%s) + 900 ))"
+          auth=""
+          while :; do
+            code="$(curl -s --max-time 20 -o /tmp/result.json -w '%{http_code}' "$KEEPER_URL/result?id=${CEREMONY}")" || code=000
+            if [ "$code" = "200" ]; then
+              if jq -e '.pending' /tmp/result.json >/dev/null 2>&1; then :; else
+                auth="$(jq -r '.authorizationId // empty' /tmp/result.json)"
+                [ -n "$auth" ] && break
+              fi
+            elif [ "$code" = "410" ]; then
+              echo "::error::the ceremony ended without an authorization: $(jq -r '.error // "gone"' /tmp/result.json 2>/dev/null). Nobody Face ID'd this run."
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::no Face ID within the 15-minute window — the deploy was not authorized."
+              exit 1
+            fi
+            sleep 10
+          done
+          redeem="$(curl -sS --max-time 20 -X POST -H 'content-type: application/json' \
+            -d "{\"authorizationId\":\"$auth\",\"requestType\":\"bounded.deploy-request.v1\",\"request\":$REQ}" \
+            "$KEEPER_URL/redeem")"
+          person="$(jq -r '.redeemed.person // empty' <<<"$redeem")"
+          if [ -z "$person" ]; then
+            echo "::error::redemption refused: $(jq -r '.error // "unknown"' <<<"$redeem"). The grant did not match this run's request — failing closed."
+            exit 1
+          fi
+          cred="$(jq -r '.redeemed.credentialId' <<<"$redeem")"
+          be="$(jq -r '.redeemed.backupEligible' <<<"$redeem")"
+          {
+            echo "## Authorized by Face ID"
+            echo "- person: \`$person\`"
+            echo "- credential: \`$cred\`"
+            echo "- backupEligible: \`$be\` (synced passkey ⇒ aal2 — recorded, not assumed away)"
+            echo "- request digest bound to run ${GITHUB_RUN_ID} @ ${GITHUB_SHA}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "✓ authorized by $person (credential $cred)"
+
+      - name: Close the ceremony notification
+        if: ${{ !inputs.break_glass && steps.ceremony.outputs.issue_url != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_URL: ${{ steps.ceremony.outputs.issue_url }}
+        run: gh issue close "$ISSUE_URL" --comment "Authorized by Face ID; ceremony complete." || true
+
+      # BREAK GLASS — the retired comment gate, kept solely for a keeper that
+      # cannot serve a ceremony. Loud in the summary.
+      - name: Await approval (BREAK GLASS — comment gate, retired for routine use)
+        if: ${{ inputs.break_glass }}
         uses: bounded-systems/await-approval@3eda4124e16463741037ebe8e546419eaaa4824b # main
         with:
           approvers: bdelanghe
-          issue-title: "Approve desk deploy (mints an account-wide Workers:Edit token)"
+          issue-title: "BREAK GLASS: approve desk deploy by comment (keeper cannot serve a ceremony)"
           issue-body: >
-            A desk-deploy run wants to mint a short-lived Workers Scripts:Edit token (via the
-            broker's /deploy/desk tier) and `wrangler deploy` the desk Worker — the Front Desk
-            board at desk.bounded.tools. The grant is account-wide. The FIRST run also attaches
-            the custom domain, which creates the DNS record.
+            A desk-deploy run was dispatched with break_glass: true — the Face ID gate was
+            BYPASSED on the stated grounds that the keeper itself cannot serve a ceremony.
+            If keeper.bounded.tools is actually healthy, deny this and ask why. Mints an
+            account-wide Workers:Edit token on approval.
+
+      - name: Record the break-glass in the summary
+        if: ${{ inputs.break_glass }}
+        run: |
+          {
+            echo "## ⚠ BREAK GLASS deploy"
+            echo "The Face ID gate was bypassed via break_glass — authorized by COMMENT, the retired mechanism. Grounds must be that the keeper itself could not serve a ceremony."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Mint the deploy token (via OIDC broker /deploy/desk)
         id: token
