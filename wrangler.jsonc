@@ -6,6 +6,20 @@
   "main": "src/worker.js",
   "compatibility_date": "2026-06-21",
 
+  // The DNS record is created by this attach — there is no separate console step and no
+  // terraform record. Note for the FIRST deploy: a first custom-domain attach preflights
+  // GET /zones/{id}/workers/routes, which an account-only token answers with 10000, while
+  // REdeploys of an already-attached domain never touch the zone at all. That asymmetry is
+  // why other lanes' redeploys "proved" domains worked while first attaches still failed —
+  // so the broker entry for this repo must carry `domains` (the zone-READ groups), not just
+  // `scripts`. See WORKERS_DEPLOY_PERMISSION_VARS in the broker.
+  "routes": [
+    {
+      "pattern": "desk.bounded.tools",
+      "custom_domain": true
+    }
+  ],
+
   // The filtered feed, published by bounded-systems/front-desk-feed — a repo that
   // exists to do exactly this one thing, so the cosign identity a verifier pins
   // names one workflow rather than twenty unrelated ones. The `feed` branch is a
