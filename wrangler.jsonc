@@ -1,0 +1,24 @@
+{
+  // The Front Desk, live. A Worker — not a static-assets site — because the page
+  // is computed per request: the board's age is measured against the reader's
+  // clock, which a build-time render structurally cannot do.
+  "name": "bounded-desk",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-06-21",
+
+  // The filtered feed, published by bounded-systems/front-desk-feed — a repo that
+  // exists to do exactly this one thing, so the cosign identity a verifier pins
+  // names one workflow rather than twenty unrelated ones. The `feed` branch is a
+  // single parentless commit, force-pushed hourly.
+  //
+  // The Worker refuses to render anything that does not identify itself as the
+  // `front-desk-public` feed, so pointing this at the wrong place — the private
+  // projection above all — fails closed rather than leaking private issue titles.
+  "vars": {
+    "FEED_URL": "https://raw.githubusercontent.com/bounded-systems/front-desk-feed/feed/front-desk-public.json",
+    "DESK_LIMIT": "25"
+  }
+
+  // Route + DNS for desk.bounded.tools are manual [settings] — the host does not
+  // resolve today. Add the custom domain to this Worker once the name exists.
+}
