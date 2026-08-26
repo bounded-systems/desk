@@ -1,0 +1,138 @@
+name: deploy
+
+# Deploy the desk Worker to desk.bounded.tools.
+#
+# NO STORED CLOUDFLARE CREDENTIAL. The token is minted per run from the OIDC broker's
+# /deploy/desk tier, which pins this workflow ref, this owner, this audience and this
+# environment. Nothing here holds a Cloudflare key, and none exists between runs.
+#
+# THE FIRST DEPLOY ATTACHES THE CUSTOM DOMAIN, and that is the run most likely to fail
+# in a way later runs cannot reproduce: a first attach preflights
+# GET /zones/{id}/workers/routes, which an account-only token answers with 10000, while a
+# REdeploy of an already-attached domain never touches the zone. So the broker entry must
+# carry `domains` (zone READ) alongside `scripts`. A lane that redeploys fine and cannot
+# make its first attach is exactly the shape this comment exists to stop repeating.
+#
+# DISPATCH-ONLY, deliberately. A push-triggered deploy of a public read surface would put
+# the approval gate on every merge, and the gate is what makes the account-wide
+# Workers:Edit mint safe.
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC → broker /deploy/desk
+  contents: read
+  issues: write # the manual-approval composite opens/updates the approval issue
+
+# One deploy at a time; never cancel one already in flight.
+concurrency:
+  group: desk-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: desk-deploy
+    timeout-minutes: 60 # bound a forgotten approval — the wait must not hang a runner forever
+    steps:
+      - name: Refuse to deploy from any ref but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::desk deploys only from refs/heads/main (got ${{ github.ref }})"
+          exit 1
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+
+      # TRIPWIRE, before the approval and before any credential exists. The board's
+      # selection rules and the fail-closed guards are the whole product; shipping a
+      # Worker whose wrong-feed guard regressed is worse than not shipping.
+      - name: Unit tests (tripwire)
+        run: node --test test/*.test.mjs
+
+      # Human approval BEFORE the mint — no account-wide Workers:Edit token exists until a
+      # human signs off. Same composite and pin the other privileged lanes use.
+      - name: Await approval
+        uses: bounded-systems/await-approval@3eda4124e16463741037ebe8e546419eaaa4824b # main
+        with:
+          approvers: bdelanghe
+          issue-title: "Approve desk deploy (mints an account-wide Workers:Edit token)"
+          issue-body: >
+            A desk-deploy run wants to mint a short-lived Workers Scripts:Edit token (via the
+            broker's /deploy/desk tier) and `wrangler deploy` the desk Worker — the Front Desk
+            board at desk.bounded.tools. The grant is account-wide. The FIRST run also attaches
+            the custom domain, which creates the DNS record.
+
+      - name: Mint the deploy token (via OIDC broker /deploy/desk)
+        id: token
+        env:
+          CF_BROKER_URL: ${{ vars.CF_BROKER_URL }}
+          DEPLOY_AUDIENCE: cloudflare-workers-deploy-broker
+        run: |
+          set -euo pipefail
+          # ORG variable, deliberately — a repo-level CF_BROKER_URL SHADOWS it, and a stale
+          # shadow cost a month of falsely-green runs elsewhere in this org.
+          [ -n "${CF_BROKER_URL:-}" ] || { echo "::error::org variable CF_BROKER_URL does not resolve here (do not set a repo-level one — it shadows)"; exit 1; }
+
+          jwt="$(curl -sf "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${DEPLOY_AUDIENCE}" \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" | jq -r '.value // empty')"
+          [ -n "$jwt" ] || { echo "::error::could not obtain an OIDC token for ${DEPLOY_AUDIENCE}"; exit 1; }
+
+          body="$(curl -sf -X POST "${CF_BROKER_URL%/}/deploy/desk" -H "Authorization: Bearer $jwt")" || {
+            echo "::error::broker refused to mint the deploy token."
+            echo "::error::  401 = owner/audience/workflow-ref/environment pin rejected"
+            echo "::error::  404 = the broker's LIVE config predates the desk WORKERS_DEPLOY entry —"
+            echo "::error::        dispatch broker-deploy in bounded-systems/infra first"
+            echo "::error::  500 = broker misconfigured (a declared permission group id is unset)"
+            exit 1
+          }
+          tok="$(jq -r '.token // empty' <<<"$body")"
+          [ -n "$tok" ] || { echo "::error::broker returned no token"; exit 1; }
+          echo "::add-mask::$tok"
+
+          # Assert we got the intended target's token before using it.
+          got_deploy="$(jq -r '.deploy // "?"' <<<"$body")"
+          got_script="$(jq -r '.script // "?"' <<<"$body")"
+          [ "$got_deploy" = "desk" ] && [ "$got_script" = "bounded-desk" ] || {
+            echo "::error::unexpected mint response: deploy=$got_deploy script=$got_script (want desk/bounded-desk)"
+            exit 1
+          }
+          echo "✓ minted Workers:Edit token for deploy=desk"
+          echo "token=$tok" >> "$GITHUB_OUTPUT"
+
+      - name: wrangler deploy
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4 deploy 2>&1 | tee /tmp/deploy.log
+          ver="$(sed -n 's/.*[Vv]ersion ID: *\([0-9a-f-]*\).*/\1/p' /tmp/deploy.log | tail -1)"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "deployed version ${ver:-<unparsed>}"
+
+      # A SUCCESSFUL `wrangler deploy` IS NOT EVIDENCE THAT THE EDGE SERVES IT. On a first
+      # attach the DNS record has to propagate before desk.bounded.tools answers at all, so
+      # this polls rather than asserting once — and it asserts the board actually renders,
+      # not merely that something returned 200. `/healthz` deliberately does NOT touch the
+      # feed, so a 200 there with a failing board would be a false green; the board itself
+      # is what gets probed.
+      - name: Read-back probe — does the edge serve the board?
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 600 ))
+          while :; do
+            code="$(curl -sS -o /tmp/probe.html -w '%{http_code}' --max-time 20 https://desk.bounded.tools/ || echo 000)"
+            if [ "$code" = "200" ] && grep -q 'Board projected at' /tmp/probe.html; then
+              echo "✓ desk.bounded.tools serves the board"
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::read-back timed out after 600s: the edge answers HTTP ${code} and did not render a dated board. The wrangler deploy may have succeeded — what this run cannot claim is that desk.bounded.tools is SERVING it." >&2
+              head -c 400 /tmp/probe.html >&2 || true
+              exit 1
+            fi
+            sleep 15
+          done

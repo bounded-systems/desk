@@ -1,0 +1,16 @@
+{
+  "name": "@bounded-systems/desk",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "The Front Desk, live — a standalone Worker that renders the org's ranked board at request time.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}
