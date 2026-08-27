@@ -17,6 +17,14 @@
     {
       "pattern": "desk.bounded.tools",
       "custom_domain": true
+    },
+    {
+      // prs.bounded.tools (#480/#713) — the open-PR list, same Worker, selected
+      // by hostname. The first deploy after this lands ATTACHES the domain, so
+      // that run needs the `domains` group the broker entry already carries
+      // (see the note above — this is exactly the first-attach asymmetry).
+      "pattern": "prs.bounded.tools",
+      "custom_domain": true
     }
   ],
 
@@ -30,6 +38,10 @@
   // projection above all — fails closed rather than leaking private issue titles.
   "vars": {
     "FEED_URL": "https://raw.githubusercontent.com/bounded-systems/front-desk-feed/feed/front-desk-public.json",
+    // The PR feed, published by the SAME front-desk-feed run as the desk feed
+    // (scripts/prs.sh) — the Worker refuses to render it anywhere but the prs
+    // host, and refuses any feed that does not name itself front-desk-prs-public.
+    "PRS_FEED_URL": "https://raw.githubusercontent.com/bounded-systems/front-desk-feed/feed/front-desk-prs.json",
     "DESK_LIMIT": "25"
   }
 

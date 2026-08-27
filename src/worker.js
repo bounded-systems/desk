@@ -15,8 +15,11 @@
 // board that cannot be read and a board with nothing on it are different
 // sentences, and only one of them is ever true.
 
-import { select, DEFAULT_LIMIT, FeedError } from "./select.js";
-import { renderBoard, renderUnavailable } from "./render.js";
+import { select, selectPrs, DEFAULT_LIMIT, FeedError } from "./select.js";
+import { renderBoard, renderPrs, renderUnavailable } from "./render.js";
+
+/** The hostname that serves the PR list instead of the board (#480/#713). */
+const PRS_HOST_DEFAULT = "prs.bounded.tools";
 
 /** Seconds the rendered board may be reused at the edge. */
 const EDGE_TTL = 60;
@@ -48,13 +51,21 @@ export default {
       return new Response("ok\n", { status: 200, headers: { "cache-control": "no-store" } });
     }
 
+    // One Worker, two hosts: the desk renders the claimable board, the prs
+    // host renders the open-PR list (#480/#713). Selected by hostname so a
+    // reader cannot reach the wrong page by path — and each host has its own
+    // feed, each feed names itself, and each selector refuses the other's.
+    const isPrs = url.hostname === (env.PRS_HOST || PRS_HOST_DEFAULT);
+
     // No destination is baked in: where the filtered feed is published is a
     // maintainer decision (see site#241), so it arrives as configuration and the
     // worker refuses rather than guessing.
-    const feedUrl = env.FEED_URL;
+    const feedUrl = isPrs ? env.PRS_FEED_URL : env.FEED_URL;
     if (!feedUrl) {
       return html(
-        renderUnavailable("FEED_URL is not configured for this Worker."),
+        renderUnavailable(
+          `${isPrs ? "PRS_FEED_URL" : "FEED_URL"} is not configured for this Worker.`,
+        ),
         503,
         EDGE_TTL,
       );
@@ -84,7 +95,7 @@ export default {
 
     let board;
     try {
-      board = select(feed, limit);
+      board = isPrs ? selectPrs(feed) : select(feed, limit);
     } catch (err) {
       // A FeedError is the guard doing its job (wrong feed, undatable snapshot);
       // anything else is a bug here. Both are "cannot stand behind this", so both
@@ -104,6 +115,10 @@ export default {
       });
     }
 
-    return html(renderBoard(board, Date.now(), EDGE_TTL), 200, EDGE_TTL);
+    return html(
+      isPrs ? renderPrs(board, Date.now(), EDGE_TTL) : renderBoard(board, Date.now(), EDGE_TTL),
+      200,
+      EDGE_TTL,
+    );
   },
 };

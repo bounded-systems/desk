@@ -84,3 +84,47 @@ export function select(feed, limit = DEFAULT_LIMIT) {
     })),
   };
 }
+
+/**
+ * Reduce the PR feed to the list prs.bounded.tools renders (#480/#713).
+ *
+ * No ranking and no limit: the feed lists changes awaiting a check, the board
+ * does not rank them, and inventing an order beyond "newest first per repo"
+ * would be inventing a ranking. The upstream filter already reduced the feed
+ * to OPEN PRs in public repos; this guard exists so a misconfigured URL —
+ * the desk feed above all, whose rows this page must never present as PRs —
+ * fails closed rather than rendering the wrong feed.
+ */
+export function selectPrs(feed) {
+  if (!feed || feed.feed !== "front-desk-prs-public") {
+    throw new FeedError(
+      `expected the 'front-desk-prs-public' feed, got '${feed?.feed ?? "(unnamed)"}'. ` +
+        "Only the PR feed may be rendered here — any other feed is the wrong page's data.",
+    );
+  }
+  if (!feed.generated_at || Number.isNaN(Date.parse(feed.generated_at))) {
+    throw new FeedError(
+      "the feed carries no parseable generated_at — refusing to render a list that cannot state its age.",
+    );
+  }
+
+  const items = Array.isArray(feed.items) ? feed.items : [];
+  const sorted = [...items].sort((a, b) =>
+    a.repo === b.repo
+      ? (b.number ?? 0) - (a.number ?? 0)
+      : String(a.repo).localeCompare(String(b.repo)),
+  );
+  return {
+    generated_at: feed.generated_at,
+    count: sorted.length,
+    claimed: items.filter((i) => i.claimed).length,
+    items: sorted.map((i) => ({
+      repo: i.repo,
+      number: i.number,
+      title: i.title,
+      url: i.url,
+      labels: i.labels || [],
+      claimed: !!i.claimed,
+    })),
+  };
+}
