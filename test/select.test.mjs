@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { select, FeedError, DEFAULT_LIMIT } from "../src/select.js";
+import { select, selectPrs, FeedError, DEFAULT_LIMIT } from "../src/select.js";
 
 const item = (o = {}) => ({
   repo: "bounded-systems/x", number: 1, title: "t", url: "u",
@@ -64,4 +64,60 @@ test("an empty board is a real answer, not an error", () => {
   const r = select(feed([]));
   assert.deepEqual(r.items, []);
   assert.equal(r.withheld.todo_total, 0);
+});
+
+// ── selectPrs (#480/#713) ────────────────────────────────────────────────────
+
+const prItem = (o = {}) => ({
+  repo: "bounded-systems/x", number: 1, title: "t", url: "u",
+  labels: [], claimed: false, ...o,
+});
+const prFeed = (items, o = {}) => ({
+  feed: "front-desk-prs-public", generated_at: "2026-08-27T22:00:00Z", items, ...o,
+});
+
+// The two selectors must refuse each other's feed: the desk feed rendered on
+// the PR page would present issues as PRs, and the PR feed on the desk would
+// be a ranking that does not exist.
+test("selectPrs refuses any feed that is not front-desk-prs-public", () => {
+  assert.throws(() => selectPrs(prFeed([], { feed: "front-desk-public" })), FeedError);
+  assert.throws(() => selectPrs({ items: [] }), FeedError);
+  assert.throws(() => selectPrs(null), FeedError);
+});
+
+test("select refuses the PR feed", () => {
+  assert.throws(() => select(prFeed([])), FeedError);
+});
+
+test("selectPrs refuses a snapshot it cannot date", () => {
+  assert.throws(() => selectPrs(prFeed([], { generated_at: undefined })), FeedError);
+  assert.throws(() => selectPrs(prFeed([], { generated_at: "nope" })), FeedError);
+});
+
+test("selectPrs sorts by repo, newest number first within a repo", () => {
+  const r = selectPrs(prFeed([
+    prItem({ repo: "bounded-systems/b", number: 2 }),
+    prItem({ repo: "bounded-systems/a", number: 7 }),
+    prItem({ repo: "bounded-systems/b", number: 9 }),
+  ]));
+  assert.deepEqual(r.items.map((i) => [i.repo, i.number]), [
+    ["bounded-systems/a", 7],
+    ["bounded-systems/b", 9],
+    ["bounded-systems/b", 2],
+  ]);
+});
+
+test("selectPrs counts, carries claimed, and invents nothing", () => {
+  const r = selectPrs(prFeed([
+    prItem({ number: 1, claimed: true }),
+    prItem({ number: 2 }),
+  ]));
+  assert.equal(r.count, 2);
+  assert.equal(r.claimed, 1);
+  assert.equal(r.items.find((i) => i.number === 2).claimed, false);
+  assert.equal(r.items.find((i) => i.number === 1).claimed, true);
+  assert.equal(r.generated_at, "2026-08-27T22:00:00Z");
+  for (const i of r.items) {
+    assert.deepEqual(Object.keys(i).sort(), ["claimed", "labels", "number", "repo", "title", "url"]);
+  }
 });

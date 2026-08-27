@@ -45,15 +45,20 @@ function stamp(generatedAt, now, edgeTtlSeconds) {
       </div>`;
 }
 
+const tile = (n, l) =>
+  `<div class="tile"><div class="tile__n">${esc(n)}</div><div class="tile__l">${esc(l)}</div></div>`;
+
+// No PR tile (#480): a PR is not claimable work and the desk feed no longer
+// carries PR rows at all — they have their own page, linked from the footer.
+// heldBack below still names pull_requests DEFENSIVELY: it renders only when
+// the count is nonzero, which after the feed change means an upstream
+// regression, and a page that quietly hides that is how it goes unnoticed.
 function tiles(d) {
   const w = d.withheld || {};
-  const tile = (n, l) =>
-    `<div class="tile"><div class="tile__n">${esc(n)}</div><div class="tile__l">${esc(l)}</div></div>`;
   return `<div class="desk__tiles">
         ${tile(d.items.length, "shown")}
         ${tile(w.todo_total ?? "?", "not started")}
         ${tile(w.claimed ?? 0, "already claimed")}
-        ${tile(w.pull_requests ?? 0, "PRs (not claimable)")}
       </div>`;
 }
 
@@ -158,7 +163,39 @@ export function renderBoard(d, now = Date.now(), edgeTtlSeconds = 60) {
       ${stamp(d.generated_at, now, edgeTtlSeconds)}
       ${tiles(d)}
       ${rows(d)}
-      <footer>${heldBack(d)}</footer>`,
+      <footer>${heldBack(d)}<p class="muted">Open pull requests live at <a href="https://prs.bounded.tools">prs.bounded.tools</a> — changes awaiting a check, not work to pick up.</p></footer>`,
+  );
+}
+
+/** The open PRs, prs.bounded.tools (#480/#713): newest first, per repo. */
+export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
+  const description =
+    "Every open pull request in the org's public repos — changes awaiting a check, projected from the same board as the desk.";
+  const list = d.items.length
+    ? d.items
+        .map(
+          (i) => `<div class="row">
+        <div class="row__score">#${esc(i.number)}</div>
+        <div class="row__body">
+          <p class="row__title"><a href="${esc(i.url)}">${esc(i.title)}</a></p>
+          <p class="row__where">${esc(String(i.repo).replace(/^bounded-systems\//, ""))}${i.claimed ? " &middot; claimed" : ""}</p>
+        </div>
+      </div>`,
+        )
+        .join("\n      ")
+    : `<div class="stamp"><strong>No open pull requests.</strong> The backlog is drained.</div>`;
+  return page(
+    "PRs — Bounded Systems",
+    description,
+    `    <h1>PRs</h1>
+    <p class="lede">${esc(description)}</p>
+      ${stamp(d.generated_at, now, edgeTtlSeconds)}
+      <div class="desk__tiles">
+        ${tile(d.count, "open")}
+        ${tile(d.claimed, "claimed")}
+      </div>
+      ${list}
+      <footer><p class="muted">The claimable queue lives at <a href="https://desk.bounded.tools">desk.bounded.tools</a>.</p></footer>`,
   );
 }
 
