@@ -115,17 +115,20 @@ export function select(feed, limit = DEFAULT_LIMIT) {
 // twice. The retired ones are counted, not dropped silently.
 const isFinished = (i) => status(i) === "Done" || i.issue_state === "CLOSED";
 
-// The one ordering decision on this page, and it is a GROUPING over the board's
-// own Status field rather than a rank: what someone is actively on, then what is
-// stuck, then what is spoken for but not started. Within a group, repo then
-// number — stable, and not a claim about importance. The board scores
-// claimABLE work; once a thing is claimed the score answers a question nobody
-// is asking here.
-const CLAIM_ORDER = ["In Progress", "Blocked", "Todo"];
-const claimRank = (i) => {
-  const r = CLAIM_ORDER.indexOf(status(i));
-  return r === -1 ? CLAIM_ORDER.length : r;
-};
+// ORDERING IS repo THEN number, and deliberately says nothing (#10).
+//
+// This used to group by the board's `Status` — In Progress, then Blocked, then
+// Todo — on the reasoning that "someone is on it" and "someone has it but has
+// not started" are different answers to "is anyone moving on this". They are.
+// `Status` just does not distinguish them: checked against reality on 2026-08-28,
+// it was wrong on all five live rows, in both directions — two rows marked
+// In Progress were finished or abandoned, three marked Todo had merged work.
+// It is a hand-maintained field, so it goes stale exactly when a claim does.
+//
+// Ordering by it therefore sorted noise to the top. repo-then-number is
+// arbitrary but STABLE and makes no claim it cannot keep. `Status` survives in
+// this file for one job only — `isFinished`, where `Done` is a terminal signal
+// rather than a report of motion.
 
 /**
  * Reduce the public feed to what is currently claimed — claims.bounded.tools.
@@ -153,9 +156,7 @@ export function selectClaims(feed) {
   const live = claimed.filter((i) => !isFinished(i));
   const sorted = [...live].sort(
     (a, b) =>
-      claimRank(a) - claimRank(b) ||
-      String(a.repo).localeCompare(String(b.repo)) ||
-      (a.number ?? 0) - (b.number ?? 0),
+      String(a.repo).localeCompare(String(b.repo)) || (a.number ?? 0) - (b.number ?? 0),
   );
 
   return {
@@ -163,19 +164,18 @@ export function selectClaims(feed) {
     count: sorted.length,
     withheld: {
       // Claims on work the board calls Done, or on issues GitHub calls closed.
-      // Printed by the page: a claim count that quietly included finished work
-      // would drift upward forever and mean nothing.
+      // A TILE since #10, not a footnote: the claim doors write the `claimed`
+      // label and nothing removes it, so this number only grows — 104 of 111
+      // claimed rows on 2026-08-28. Held back from the list (a finished claim is
+      // a record, not a reservation) but shown as a count, because a number
+      // nobody sees is a number nobody drains.
       finished: claimed.length - live.length,
     },
-    // Counted separately because "someone is on it" and "someone has it but has
-    // not started" are different answers to "is anyone moving on this".
-    in_progress: sorted.filter((i) => status(i) === "In Progress").length,
     items: sorted.map((i) => ({
       repo: i.repo,
       number: i.number,
       title: i.title,
       url: i.url,
-      status: status(i),
       labels: i.labels || [],
     })),
   };

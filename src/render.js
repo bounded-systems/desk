@@ -58,10 +58,19 @@ const tile = (n, l) =>
 
 const shortRepo = (r) => String(r).replace(/^bounded-systems\//, "");
 
-/** One list row: a left-hand marker, the linked title, and where it lives. */
+/**
+ * One list row: an optional left-hand marker, the linked title, and where it
+ * lives.
+ *
+ * `marker` is null on the claims page (#10) and the slot is then omitted
+ * entirely rather than rendered empty. The slot means "the board's numeric
+ * rank" on issues.bounded.tools, so filling it with anything else — as the
+ * claims page did with `Status` — makes the two pages disagree about what the
+ * same position means.
+ */
 const row = (marker, title, url, where) =>
   `<div class="row">
-        <div class="row__score">${esc(marker)}</div>
+        ${marker == null ? "" : `<div class="row__score">${esc(marker)}</div>`}
         <div class="row__body">
           <p class="row__title"><a href="${esc(url)}">${esc(title)}</a></p>
           <p class="row__where">${esc(where)}</p>
@@ -210,15 +219,16 @@ export function renderClaims(d, now = Date.now(), edgeTtlSeconds = 60) {
     "What is already spoken for — every open board row carrying a claim, so a session can see what not to start.";
   const list = d.items.length
     ? d.items
-        .map((i) =>
-          row(i.status || "—", i.title, i.url, `${shortRepo(i.repo)} · ${i.number}`),
-        )
+        .map((i) => row(null, i.title, i.url, `${shortRepo(i.repo)} · ${i.number}`))
         .join("\n      ")
     : `<div class="stamp">
         <strong>Nothing is claimed right now.</strong> Every open row on the board is free to pick up.
       </div>`;
   const held = (d.withheld || {}).finished
-    ? `<p class="muted">Held back: ${esc(d.withheld.finished)} claim(s) on work the board calls Done or GitHub calls closed — a finished claim is a record, not a reservation.</p>`
+    ? `<p class="muted"><strong>Finished, still labelled</strong> counts claims on work the board calls Done or
+        GitHub calls closed. They are held out of the list — a finished claim is a record, not a reservation —
+        but they are counted, because the claim doors write the <code>claimed</code> label and nothing removes it,
+        so the number only grows until someone drains it.</p>`
     : "";
   return page(
     "Claims — Bounded Systems",
@@ -228,7 +238,7 @@ export function renderClaims(d, now = Date.now(), edgeTtlSeconds = 60) {
       ${stamp(d.generated_at, now, edgeTtlSeconds)}
       <div class="desk__tiles">
         ${tile(d.count, "claimed")}
-        ${tile(d.in_progress, "in progress")}
+        ${tile((d.withheld || {}).finished ?? 0, "finished, still labelled")}
       </div>
       ${list}
       <footer>${held}<p class="muted">This page says <em>that</em> a row is claimed, never <em>by whom</em>: the public feed

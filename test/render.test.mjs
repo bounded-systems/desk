@@ -102,13 +102,33 @@ const claims = (o = {}) => ({
   ...o,
 });
 
-test("the claims page renders rows with the board's own Status, and the age", () => {
+test("the claims page renders rows without a marker, and the age", () => {
   const html = renderClaims(claims(), AT, 60);
   assert.match(html, /Claims — Bounded Systems/);
-  assert.match(html, /In Progress/);
   assert.match(html, /prx · 434/);
   assert.match(html, /3 hours ago/);
   assert.match(html, /a &lt;fix&gt;/);   // escaping holds
+});
+
+// #10. The fixture items still CARRY `status`, so this fails if the renderer
+// starts reading it again — a weaker test would just drop the field and pass
+// for the wrong reason.
+test("the claims page never renders the board's Status", () => {
+  const html = renderClaims(claims(), AT, 60);
+  assert.doesNotMatch(html, /In Progress/);
+  assert.doesNotMatch(html, /Todo/);
+});
+
+// The slot means "the board's numeric rank" on issues.bounded.tools. Claims rows
+// must omit it entirely rather than render it empty, or the two pages disagree
+// about what the same position means.
+test("the claims page emits no rank slot at all", () => {
+  // The class is defined in the shared stylesheet either way, so this must
+  // match the ROW MARKUP, not the CSS — a /row__score/ regex passes on the
+  // <style> block and proves nothing.
+  assert.doesNotMatch(renderClaims(claims(), AT, 60), /<div class="row__score">/);
+  // ...while the issue queue, which does have a rank, still emits one.
+  assert.match(renderIssues(board(), AT, 60), /<div class="row__score">/);
 });
 
 // The public feed drops assignees on purpose. A page that just omitted the name
@@ -120,13 +140,21 @@ test("the claims page says it cannot name the claimant, and where the name is", 
   assert.match(html, /claim comment on the issue/);
 });
 
-test("finished claims are held back with a count, not dropped silently", () => {
-  assert.match(renderClaims(claims(), AT, 60), /3 claim\(s\) on work the board calls Done/);
-  assert.doesNotMatch(renderClaims(claims({ withheld: { finished: 0 } }), AT, 60), /Held back/);
+test("finished claims are held back, and counted on a tile", () => {
+  const html = renderClaims(claims(), AT, 60);
+  // The count is a TILE now, not a footnote: nothing removes the `claimed`
+  // label, so this number only grows until someone drains it.
+  assert.match(html, /finished, still labelled/);
+  assert.match(html, /<div class="tile__n">3<\/div>/);
+  assert.match(html, /nothing removes it/);
+  assert.doesNotMatch(
+    renderClaims(claims({ withheld: { finished: 0 } }), AT, 60),
+    /nothing removes it/,
+  );
 });
 
 test("nothing claimed says the board is free, not that it is unreadable", () => {
-  const html = renderClaims(claims({ count: 0, in_progress: 0, items: [], withheld: { finished: 0 } }), AT, 60);
+  const html = renderClaims(claims({ count: 0, items: [], withheld: { finished: 0 } }), AT, 60);
   assert.match(html, /Nothing is claimed right now/);
   assert.doesNotMatch(html, /could not be read/);
 });
