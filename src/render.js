@@ -1,4 +1,4 @@
-// Render the claimable head of the board as a page.
+// The four pages, and the one thing they all have to get right.
 //
 // FRESHNESS IS COMPUTED AT REQUEST TIME. This is the whole reason the desk is an
 // app rather than a page. gen-desk.mjs deliberately refused to print "3 hours
@@ -11,6 +11,13 @@
 // The staleness threshold matches front-desk.sh and gen-desk.mjs: the lane
 // publishes hourly, so the number worth reacting to is not "this is old" but
 // "the lane stopped and nobody noticed".
+//
+// ONE QUESTION PER PAGE. issues.bounded.tools no longer mentions claims at all —
+// not a tile, not a held-back line — because a queue of what to pick up and a
+// register of what is already taken are different questions, and the page that
+// tried to answer both answered neither cleanly. This is the same move #480/#713
+// made when PRs left the desk: the count does not vanish, it moves to the host
+// that owns it, and a footer line says where.
 
 const STALE_AFTER_HOURS = 24;
 
@@ -27,77 +34,39 @@ function humanAge(ms) {
   return `${Math.floor(h / 24)} days`;
 }
 
-function stamp(generatedAt, now, edgeTtlSeconds) {
+const isStale = (generatedAt, now) => (now - Date.parse(generatedAt)) / 36e5 > STALE_AFTER_HOURS;
+
+function stamp(generatedAt, now, edgeTtlSeconds, what = "Board", extra = "") {
   const ageMs = now - Date.parse(generatedAt);
-  const stale = ageMs / 36e5 > STALE_AFTER_HOURS;
   const when = esc(generatedAt);
-  if (stale) {
+  if (isStale(generatedAt, now)) {
     return `<div class="stamp stamp--stale">
-        <strong>This snapshot is old.</strong> The board was projected at <span class="mono">${when}</span>,
+        <strong>This snapshot is old.</strong> ${esc(what)} projected at <span class="mono">${when}</span>,
         ${esc(humanAge(ageMs))} ago — more than ${STALE_AFTER_HOURS} hours. The projection lane publishes
-        hourly, so this means it stopped. Treat the ranking below as history, not as the board.
+        hourly, so this means it stopped. Treat what follows as history, not as the board.${extra}
       </div>`;
   }
   return `<div class="stamp">
-        Board projected at <span class="mono">${when}</span>, ${esc(humanAge(ageMs))} ago.
+        ${esc(what)} projected at <span class="mono">${when}</span>, ${esc(humanAge(ageMs))} ago.
         Read live on each request and cached at the edge for up to ${edgeTtlSeconds}s, so this age is
-        accurate to within that window.
+        accurate to within that window.${extra}
       </div>`;
 }
 
 const tile = (n, l) =>
   `<div class="tile"><div class="tile__n">${esc(n)}</div><div class="tile__l">${esc(l)}</div></div>`;
 
-// No PR tile (#480): a PR is not claimable work and the desk feed no longer
-// carries PR rows at all — they have their own page, linked from the footer.
-// heldBack below still names pull_requests DEFENSIVELY: it renders only when
-// the count is nonzero, which after the feed change means an upstream
-// regression, and a page that quietly hides that is how it goes unnoticed.
-function tiles(d) {
-  const w = d.withheld || {};
-  return `<div class="desk__tiles">
-        ${tile(d.items.length, "shown")}
-        ${tile(w.todo_total ?? "?", "not started")}
-        ${tile(w.claimed ?? 0, "already claimed")}
-      </div>`;
-}
+const shortRepo = (r) => String(r).replace(/^bounded-systems\//, "");
 
-function rows(d) {
-  if (!d.items.length) {
-    return `<div class="stamp">
-        <strong>Nothing claimable right now.</strong> Everything on the board is claimed,
-        finished, or waiting on a check.
-      </div>`;
-  }
-  // "prx &middot; 434", not "bounded-systems/prx#434": the org prefix is identical on
-  // every row and pure noise in a list built to be scanned. The title already
-  // links to the issue; this line only says where it lives.
-  return d.items
-    .map(
-      (i) => `<div class="row">
-        <div class="row__score">${esc(i.score.toFixed(2))}</div>
+/** One list row: a left-hand marker, the linked title, and where it lives. */
+const row = (marker, title, url, where) =>
+  `<div class="row">
+        <div class="row__score">${esc(marker)}</div>
         <div class="row__body">
-          <p class="row__title"><a href="${esc(i.url)}">${esc(i.title)}</a></p>
-          <p class="row__where">${esc(String(i.repo).replace(/^bounded-systems\//, ""))} &middot; ${esc(i.number)}</p>
+          <p class="row__title"><a href="${esc(url)}">${esc(title)}</a></p>
+          <p class="row__where">${esc(where)}</p>
         </div>
-      </div>`,
-    )
-    .join("\n      ");
-}
-
-function heldBack(d) {
-  const w = d.withheld || {};
-  // Never a silent cap: if the list is truncated, the page says by how much.
-  const held = [
-    w.claimed ? `${w.claimed} already claimed` : null,
-    w.pull_requests
-      ? `${w.pull_requests} pull request(s), which are changes awaiting a check rather than work to pick up`
-      : null,
-    w.unscored ? `${w.unscored} unranked by the board` : null,
-    w.beyond_limit ? `${w.beyond_limit} ranked below the ${d.limit} shown` : null,
-  ].filter(Boolean);
-  return held.length ? `<p class="muted">Held back: ${esc(held.join("; "))}.</p>` : "";
-}
+      </div>`;
 
 const STYLE = `
     :root { --bg:#fbfaf8; --fg:#16201c; --muted:#5c6b64; --line:#e2e0da; --card:#fff; --accent:#0C5A42; --warn:#8a4b12; --warnbg:#fdf3e7; }
@@ -109,6 +78,9 @@ const STYLE = `
       font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
     .wrap { max-width:52rem; margin:0 auto; padding:2.5rem 1.25rem 4rem; }
     h1 { font-size:1.6rem; margin:0 0 .35rem; letter-spacing:-.01em; }
+    h2 { font-size:1.05rem; margin:0; letter-spacing:-.005em; }
+    h2 a { color:inherit; text-decoration:none; border-bottom:1px solid var(--line); }
+    h2 a:hover { border-bottom-color:var(--accent); }
     .lede { color:var(--muted); margin:0 0 1.75rem; }
     .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em; }
     .muted { color:var(--muted); font-size:.9rem; }
@@ -129,6 +101,11 @@ const STYLE = `
     .row__title a:hover { border-bottom-color:var(--accent); }
     .row__where { margin:.15rem 0 0; color:var(--muted); font-size:.82rem;
       font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .sec { margin:0 0 2rem; }
+    .sec__head { display:flex; align-items:baseline; justify-content:space-between; gap:1rem;
+      padding-bottom:.4rem; border-bottom:2px solid var(--line); }
+    .sec__n { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86rem; color:var(--muted); flex:none; }
+    .sec__more { margin:.6rem 0 0; }
     footer { margin-top:2.5rem; padding-top:1.25rem; border-top:1px solid var(--line); }`;
 
 function page(title, description, body) {
@@ -151,21 +128,116 @@ ${body}
 `;
 }
 
-/** The board, ranked. */
-export function renderBoard(d, now = Date.now(), edgeTtlSeconds = 60) {
+/** The shared footer line: every page says where the other three are. */
+function elsewhere(self) {
+  const links = [
+    ["desk", "https://desk.bounded.tools", "everything at a glance"],
+    ["issues", "https://issues.bounded.tools", "what to pick up"],
+    ["claims", "https://claims.bounded.tools", "what is already taken"],
+    ["prs", "https://prs.bounded.tools", "what is awaiting a check"],
+  ].filter(([k]) => k !== self);
+  return `<p class="muted">Also: ${links
+    .map(([k, href, what]) => `<a href="${href}">${esc(k)}.bounded.tools</a> — ${esc(what)}`)
+    .join("; ")}.</p>`;
+}
+
+// ── issues.bounded.tools ─────────────────────────────────────────────────────
+
+// No claims tile and no claims line (this change), and no PR tile (#480): each
+// belongs to a host that answers for it. `heldBack` still names pull_requests
+// DEFENSIVELY — it renders only when the count is nonzero, which after the feed
+// change means an upstream regression, and a page that quietly hides that is how
+// it goes unnoticed. `claimed` is deliberately NOT in that list: a nonzero count
+// there is the normal state of a healthy board, so printing it would be noise
+// rather than a signal, and it is the claims page's number now.
+function issueTiles(d) {
+  const w = d.withheld || {};
+  return `<div class="desk__tiles">
+        ${tile(d.items.length, "shown")}
+        ${tile(w.todo_total ?? "?", "not started")}
+      </div>`;
+}
+
+function issueRows(d) {
+  if (!d.items.length) {
+    return `<div class="stamp">
+        <strong>Nothing claimable right now.</strong> Everything on the board is claimed,
+        finished, or waiting on a check.
+      </div>`;
+  }
+  // "prx &middot; 434", not "bounded-systems/prx#434": the org prefix is identical on
+  // every row and pure noise in a list built to be scanned. The title already
+  // links to the issue; this line only says where it lives.
+  return d.items
+    .map((i) => row(i.score.toFixed(2), i.title, i.url, `${shortRepo(i.repo)} · ${i.number}`))
+    .join("\n      ");
+}
+
+function issuesHeldBack(d) {
+  const w = d.withheld || {};
+  // Never a silent cap: if the list is truncated, the page says by how much.
+  const held = [
+    w.pull_requests
+      ? `${w.pull_requests} pull request(s), which are changes awaiting a check rather than work to pick up`
+      : null,
+    w.unscored ? `${w.unscored} unranked by the board` : null,
+    w.beyond_limit ? `${w.beyond_limit} ranked below the ${d.limit} shown` : null,
+  ].filter(Boolean);
+  return held.length ? `<p class="muted">Held back: ${esc(held.join("; "))}.</p>` : "";
+}
+
+/** The claimable queue, ranked — issues.bounded.tools. */
+export function renderIssues(d, now = Date.now(), edgeTtlSeconds = 60) {
   const description =
     "What is worth picking up next, ranked by the Front Desk board itself — the same projection a session reads before it claims work.";
   return page(
-    "Desk — Bounded Systems",
+    "Issues — Bounded Systems",
     description,
-    `    <h1>Desk</h1>
+    `    <h1>Issues</h1>
     <p class="lede">${esc(description)}</p>
       ${stamp(d.generated_at, now, edgeTtlSeconds)}
-      ${tiles(d)}
-      ${rows(d)}
-      <footer>${heldBack(d)}<p class="muted">Open pull requests live at <a href="https://prs.bounded.tools">prs.bounded.tools</a> — changes awaiting a check, not work to pick up.</p></footer>`,
+      ${issueTiles(d)}
+      ${issueRows(d)}
+      <footer>${issuesHeldBack(d)}<p class="muted">Work already spoken for is not listed here — it lives at <a href="https://claims.bounded.tools">claims.bounded.tools</a>.</p>${elsewhere("issues")}</footer>`,
   );
 }
+
+// ── claims.bounded.tools ─────────────────────────────────────────────────────
+
+/** What is currently claimed — claims.bounded.tools. */
+export function renderClaims(d, now = Date.now(), edgeTtlSeconds = 60) {
+  const description =
+    "What is already spoken for — every open board row carrying a claim, so a session can see what not to start.";
+  const list = d.items.length
+    ? d.items
+        .map((i) =>
+          row(i.status || "—", i.title, i.url, `${shortRepo(i.repo)} · ${i.number}`),
+        )
+        .join("\n      ")
+    : `<div class="stamp">
+        <strong>Nothing is claimed right now.</strong> Every open row on the board is free to pick up.
+      </div>`;
+  const held = (d.withheld || {}).finished
+    ? `<p class="muted">Held back: ${esc(d.withheld.finished)} claim(s) on work the board calls Done or GitHub calls closed — a finished claim is a record, not a reservation.</p>`
+    : "";
+  return page(
+    "Claims — Bounded Systems",
+    description,
+    `    <h1>Claims</h1>
+    <p class="lede">${esc(description)}</p>
+      ${stamp(d.generated_at, now, edgeTtlSeconds)}
+      <div class="desk__tiles">
+        ${tile(d.count, "claimed")}
+        ${tile(d.in_progress, "in progress")}
+      </div>
+      ${list}
+      <footer>${held}<p class="muted">This page says <em>that</em> a row is claimed, never <em>by whom</em>: the public feed
+        does not carry assignees, on purpose — it publishes the board's ranking, not a roster of who is
+        working on what. The claimant is named in the claim comment on the issue itself.</p>${elsewhere("claims")}</footer>`,
+  );
+}
+
+// ── prs.bounded.tools ────────────────────────────────────────────────────────
 
 /** The open PRs, prs.bounded.tools (#480/#713): newest first, per repo. */
 export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
@@ -173,14 +245,8 @@ export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
     "Every open pull request in the org's public repos — changes awaiting a check, projected from the same board as the desk.";
   const list = d.items.length
     ? d.items
-        .map(
-          (i) => `<div class="row">
-        <div class="row__score">#${esc(i.number)}</div>
-        <div class="row__body">
-          <p class="row__title"><a href="${esc(i.url)}">${esc(i.title)}</a></p>
-          <p class="row__where">${esc(String(i.repo).replace(/^bounded-systems\//, ""))}${i.claimed ? " &middot; claimed" : ""}</p>
-        </div>
-      </div>`,
+        .map((i) =>
+          row(`#${i.number}`, i.title, i.url, `${shortRepo(i.repo)}${i.claimed ? " · claimed" : ""}`),
         )
         .join("\n      ")
     : `<div class="stamp"><strong>No open pull requests.</strong> The backlog is drained.</div>`;
@@ -189,13 +255,118 @@ export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
     description,
     `    <h1>PRs</h1>
     <p class="lede">${esc(description)}</p>
-      ${stamp(d.generated_at, now, edgeTtlSeconds)}
+      ${stamp(d.generated_at, now, edgeTtlSeconds, "PRs")}
       <div class="desk__tiles">
         ${tile(d.count, "open")}
         ${tile(d.claimed, "claimed")}
       </div>
       ${list}
-      <footer><p class="muted">The claimable queue lives at <a href="https://desk.bounded.tools">desk.bounded.tools</a>.</p></footer>`,
+      <footer>${elsewhere("prs")}</footer>`,
+  );
+}
+
+// ── desk.bounded.tools ───────────────────────────────────────────────────────
+
+const SECTION_COPY = {
+  issues: { title: "Issues", label: "claimable", blurb: "what is worth picking up, ranked by the board" },
+  claims: { title: "Claims", label: "claimed", blurb: "what is already spoken for" },
+  prs: { title: "PRs", label: "open", blurb: "changes awaiting a check" },
+};
+
+const EMPTY_COPY = {
+  issues: "Nothing claimable right now.",
+  claims: "Nothing is claimed right now.",
+  prs: "No open pull requests.",
+};
+
+function overviewSection(s) {
+  const copy = SECTION_COPY[s.key] || { title: s.key, label: "", blurb: "" };
+  const heading = `<div class="sec__head">
+        <h2><a href="https://${esc(s.host)}">${esc(copy.title)}</a></h2>
+        <span class="sec__n">${s.ok ? `${esc(s.count)} ${esc(copy.label)}` : "unreadable"}</span>
+      </div>`;
+
+  // A section that could not be read keeps its slot and says why. The
+  // alternative — printing 0, or dropping the section — is how a reader
+  // concludes there is no work when what actually happened is that nobody could
+  // tell. "Nothing" and "not known" are different sentences here too.
+  if (!s.ok) {
+    return `<section class="sec">
+      ${heading}
+      <div class="stamp stamp--stale">
+        <strong>This section could not be read.</strong> It is not empty — the feed behind
+        <a href="https://${esc(s.host)}">${esc(s.host)}</a> did not answer in a way this page can stand behind,
+        so nothing is shown rather than a count that would be made up.
+      </div>
+      <p class="muted mono">${esc(s.reason)}</p>
+    </section>`;
+  }
+
+  const body = s.items.length
+    ? s.items
+        .map((i) => row(i.note, i.title, i.url, `${shortRepo(i.repo)} · ${i.number}`))
+        .join("\n      ")
+    : `<div class="stamp"><strong>${esc(EMPTY_COPY[s.key] || "Nothing here.")}</strong></div>`;
+
+  // Never a silent head: if the section shows fewer rows than it counted, it
+  // says so and points at the host that shows the rest. An EMPTY section gets
+  // neither line — "all of them, in full" reads as an offer when there is
+  // nothing to offer, and the heading already links to the host.
+  const more = !s.count
+    ? ""
+    : s.count > s.items.length
+      ? `<p class="muted sec__more">Showing the first ${esc(s.items.length)} of ${esc(s.count)} — the rest are at <a href="https://${esc(s.host)}">${esc(s.host)}</a>.</p>`
+      : `<p class="muted sec__more">All of them, in full, at <a href="https://${esc(s.host)}">${esc(s.host)}</a>.</p>`;
+
+  return `<section class="sec">
+      ${heading}
+      <p class="muted">${esc(copy.blurb)}</p>
+      ${body}
+      ${more}
+    </section>`;
+}
+
+/**
+ * The front door — desk.bounded.tools.
+ *
+ * Three questions on one page, each answered by the host that owns it and
+ * summarised here. The desk's own job is no longer to BE one of the lists; it is
+ * to say how much of each there is and hand the reader to the right one.
+ */
+export function renderOverview(d, now = Date.now(), edgeTtlSeconds = 60) {
+  const description =
+    "The whole desk at a glance: what is open, what is claimed, and what is worth picking up next — each summarised from the feed its own host serves.";
+
+  // A page that could not date ANY of its sections cannot state its own
+  // freshness, and the one thing every page here must do is say how old it is.
+  const head = d.generated_at
+    ? stamp(
+        d.generated_at,
+        now,
+        edgeTtlSeconds,
+        "Oldest feed",
+        ` This is the <strong>oldest</strong> of the feeds below — the only age true of all of them.`,
+      )
+    : `<div class="stamp stamp--stale"><strong>No section could be dated.</strong> Nothing below is
+        vouched for by a stamp, which means no feed answered — not that there is nothing to show.</div>`;
+
+  const incomplete = d.ok
+    ? ""
+    : `<div class="stamp stamp--stale"><strong>This overview is incomplete.</strong> At least one
+        section could not be read, so this page is served with an error status rather than as a
+        complete picture. The sections that did answer are shown below and are as good as ever; the
+        one that did not says so in its own words.</div>`;
+
+  return page(
+    "Desk — Bounded Systems",
+    description,
+    `    <h1>Desk</h1>
+    <p class="lede">${esc(description)}</p>
+      ${head}
+      ${incomplete}
+      ${d.sections.map(overviewSection).join("\n")}
+      <footer><p class="muted">Each host answers exactly one question, reads the feed live on every
+        request, and fails closed rather than showing an empty list it cannot vouch for.</p></footer>`,
   );
 }
 

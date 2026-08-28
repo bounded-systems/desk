@@ -1,7 +1,34 @@
 # @bounded-systems/desk
 
 The Front Desk, live. A standalone Cloudflare Worker that renders the org's
-ranked board **at request time**.
+board **at request time**, across four hosts.
+
+## One question per host
+
+| host | answers | selector |
+| --- | --- | --- |
+| [`issues.bounded.tools`](https://issues.bounded.tools) | what is worth picking up, ranked by the board | `select` |
+| [`claims.bounded.tools`](https://claims.bounded.tools) | what is already spoken for | `selectClaims` |
+| [`prs.bounded.tools`](https://prs.bounded.tools) | what is open and awaiting a check | `selectPrs` |
+| [`desk.bounded.tools`](https://desk.bounded.tools) | all three at a glance — the front door | `selectOverview` |
+
+One Worker, selected by hostname, because the selection rules **are** the
+product: four Workers would be four deploys, four broker entries, and four
+chances for "claimable" to come to mean four different things.
+
+The split is #7. `desk` used to *be* the issue queue, with claim facts mixed in —
+an "already claimed" tile and a held-back line. A queue of what to pick up and a
+register of what is taken are different questions, and the page trying to answer
+both answered neither cleanly. So the queue moved to `issues`, claims got
+`claims`, and `desk` took the job its name implies. The claimed count did not
+vanish; it moved to the host that owns it, and the queue carries a pointer —
+exactly the move #480/#713 made when PRs left the desk.
+
+**`claims` says *that* a row is claimed, never *by whom*.** The public filter
+deliberately drops `assignees` — it publishes the board's ranking, not a roster
+of who is working on what — so the page says so rather than letting a reader
+assume the names were cut for space. The claimant is named in the claim comment
+on the issue itself.
 
 ## Why this is an app and not a page
 
@@ -28,7 +55,7 @@ now fires when the **lane** stops, not when a deploy hasn't happened.
 
 **It does not rank.** `Score` comes from the board and is carried through
 untouched; the app only sorts on it and truncates. A ranking computed here would
-be a different board wearing the same name. `src/select.js` is a faithful port
+be a different board wearing the same name. `select()` in `src/select.js` is a faithful port
 of the site's `trim-front-desk.mjs`, which holds the same line as
 `front-desk.sh` — the three readers must agree about what "claimable" means, or
 a session and the page it reads are looking at different boards.
@@ -40,10 +67,17 @@ never silently capped.
 ## Fail-closed
 
 Every failure — feed unreachable, non-200, a snapshot with no parseable
-`generated_at`, or a feed that does not identify itself as `front-desk-public` —
-renders "the board could not be read" with a 5xx. Never an empty list: *"nothing
-claimable"* and *"the board could not be read"* are different sentences, and
-only one of them is ever true.
+`generated_at`, or a feed that does not identify itself as the one that host
+renders — renders "the board could not be read" with a 5xx. Never an empty list:
+*"nothing claimable"* and *"the board could not be read"* are different
+sentences, and only one of them is ever true.
+
+The overview is the one page that can be **partly** unreadable, and it fails
+closed per section: the sections that answered are rendered in full, the one that
+did not keeps its slot and says why in its own words, and the page is still
+served with a 5xx. Dropping the section, or printing `0`, are the two ways to
+turn "nobody could tell" into "there is nothing" — which is the same mistake at
+section scale.
 
 That last guard matters most. The **private** projection carries private repos'
 issue titles. `front-desk-public.sh` produces the publishable copy under a
@@ -55,8 +89,10 @@ title on a public page.
 
 | var | meaning |
 | --- | --- |
-| `FEED_URL` | The **filtered** `front-desk-public` feed, published by [`front-desk-feed`](https://github.com/bounded-systems/front-desk-feed). |
-| `DESK_LIMIT` | Rows rendered (default 25). |
+| `FEED_URL` | The **filtered** `front-desk-public` feed, published by [`front-desk-feed`](https://github.com/bounded-systems/front-desk-feed). Serves both the issue queue and the claims page — a claim is a fact the board already carries about a row, so splitting the hosts splits the question, not the source of truth. |
+| `PRS_FEED_URL` | The `front-desk-prs-public` feed, published by the same run. |
+| `DESK_LIMIT` | Rows the issue queue renders (default 25). |
+| `ISSUES_HOST`, `CLAIMS_HOST`, `PRS_HOST` | Override a hostname, for a preview or a rename. |
 
 The feed is cosign-signed, and this Worker does **not** verify that signature: a
 keyless verification per request is not something an edge render can afford. It
@@ -68,13 +104,20 @@ This is also **not the whole board**. The public feed carries public rows by
 construction, so the page says it is showing the public feed rather than
 implying it shows everything.
 
-## Routes
+## Paths
+
+Every host serves the same three paths, over its own selection.
 
 | path | |
 | --- | --- |
-| `/` | the board, as HTML |
+| `/` | the page, as HTML |
 | `/board.json` | the same selection, as JSON |
 | `/healthz` | liveness that does **not** touch the feed, so "is the Worker up" and "is the board readable" stay separately answerable |
+
+Any hostname that is not one of the three named ones — a `workers.dev` preview
+above all — gets the overview. It is the safe default: it links to everything, so
+a reader who landed on an unnamed host is never stuck on a page that looks like
+the whole answer.
 
 ## Open prerequisites
 
@@ -86,7 +129,10 @@ implying it shows everything.
    this org; a deploy mints a per-run token from the OIDC broker, whose
    `WORKERS_DEPLOY` entries pin an exact workflow ref. This repo needs its own
    entries before any deploy can authenticate.
-3. **`desk.bounded.tools` DNS + Worker route** — manual `[settings]`.
+3. **First custom-domain attach for `issues.` and `claims.`** — created by the
+   next deploy, not by a console step. That run is a *first* attach, which
+   preflights `GET /zones/{id}/workers/routes`; the broker entry's `domains`
+   group is what makes it authenticate, and it already carries it.
 4. Retire `desk.html`, `gen-desk.mjs`, `trim-front-desk.mjs` and
    `data/front-desk.json` from `bounded-systems/site`
    ([site#242](https://github.com/bounded-systems/site/pull/242), held open until

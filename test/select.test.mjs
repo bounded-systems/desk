@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { select, selectPrs, FeedError, DEFAULT_LIMIT } from "../src/select.js";
+import {
+  select, selectPrs, selectClaims, selectOverview,
+  FeedError, DEFAULT_LIMIT, OVERVIEW_HEAD,
+} from "../src/select.js";
 
 const item = (o = {}) => ({
   repo: "bounded-systems/x", number: 1, title: "t", url: "u",
@@ -120,4 +123,151 @@ test("selectPrs counts, carries claimed, and invents nothing", () => {
   for (const i of r.items) {
     assert.deepEqual(Object.keys(i).sort(), ["claimed", "labels", "number", "repo", "title", "url"]);
   }
+});
+
+// ── selectClaims (#7) ────────────────────────────────────────────────────────
+//
+// Claims left the issue queue and got their own host. The selector reads the
+// SAME feed — a claim is a fact the board already carries about a row — so the
+// two pages can never disagree about which snapshot they describe.
+
+const claimed = (o = {}) =>
+  item({ claimed: true, issue_state: "OPEN", fields: { Status: "Todo", Score: 1 }, ...o });
+
+test("selectClaims refuses any feed that is not front-desk-public", () => {
+  assert.throws(() => selectClaims(prFeed([])), FeedError);
+  assert.throws(() => selectClaims(feed([], { feed: "front-desk" })), FeedError);
+  assert.throws(() => selectClaims(null), FeedError);
+});
+
+test("selectClaims refuses a snapshot it cannot date", () => {
+  assert.throws(() => selectClaims(feed([], { generated_at: "nope" })), FeedError);
+});
+
+test("selectClaims keeps only claimed rows", () => {
+  const r = selectClaims(feed([claimed({ number: 1 }), item({ number: 2, claimed: false })]));
+  assert.deepEqual(r.items.map((i) => i.number), [1]);
+});
+
+// A claim on finished work is a record, not a reservation — and the two ways a
+// row can be finished are checked independently BECAUSE they disagree: a row can
+// be closed on GitHub before the board sweep moves it to Done.
+test("a claim on finished work is not a live claim, and is counted", () => {
+  const r = selectClaims(feed([
+    claimed({ number: 1 }),
+    claimed({ number: 2, fields: { Status: "Done", Score: 0 } }),   // board says done
+    claimed({ number: 3, issue_state: "CLOSED" }),                  // github says closed
+  ]));
+  assert.deepEqual(r.items.map((i) => i.number), [1]);
+  assert.equal(r.count, 1);
+  assert.equal(r.withheld.finished, 2);
+});
+
+test("selectClaims groups by the board's Status, then repo, then number", () => {
+  const r = selectClaims(feed([
+    claimed({ repo: "bounded-systems/b", number: 5, fields: { Status: "Todo" } }),
+    claimed({ repo: "bounded-systems/a", number: 9, fields: { Status: "In Progress" } }),
+    claimed({ repo: "bounded-systems/a", number: 2, fields: { Status: "Blocked" } }),
+    claimed({ repo: "bounded-systems/a", number: 1, fields: { Status: "Todo" } }),
+  ]));
+  assert.deepEqual(r.items.map((i) => [i.status, i.repo, i.number]), [
+    ["In Progress", "bounded-systems/a", 9],
+    ["Blocked", "bounded-systems/a", 2],
+    ["Todo", "bounded-systems/a", 1],
+    ["Todo", "bounded-systems/b", 5],
+  ]);
+  assert.equal(r.in_progress, 1);
+});
+
+// The public filter deliberately drops `assignees`. The selector must not invent
+// a claimant field, so the page cannot imply it knows who is on something.
+test("selectClaims carries no claimant — the feed does not have one", () => {
+  const r = selectClaims(feed([claimed()]));
+  assert.deepEqual(Object.keys(r.items[0]).sort(), [
+    "labels", "number", "repo", "status", "title", "url",
+  ]);
+});
+
+test("nothing claimed is a real answer, not an error", () => {
+  const r = selectClaims(feed([item()]));
+  assert.deepEqual(r.items, []);
+  assert.equal(r.count, 0);
+  assert.equal(r.withheld.finished, 0);
+});
+
+// ── selectOverview (#7) ──────────────────────────────────────────────────────
+
+const ok = (value) => ({ ok: true, value });
+const bad = (reason) => ({ ok: false, reason });
+
+const boardFeed = feed([
+  item({ number: 1, fields: { Status: "Todo", Score: 5 } }),
+  item({ number: 2, fields: { Status: "Todo", Score: 9 } }),
+  claimed({ number: 3, fields: { Status: "In Progress", Score: 1 } }),
+]);
+const outcomes = (o = {}) => ({
+  issues: ok(select(boardFeed)),
+  claims: ok(selectClaims(boardFeed)),
+  prs: ok(selectPrs(prFeed([prItem({ number: 4 })]))),
+  ...o,
+});
+
+test("the overview carries all three sections, in reading order", () => {
+  const r = selectOverview(outcomes());
+  assert.deepEqual(r.sections.map((s) => s.key), ["issues", "claims", "prs"]);
+  assert.deepEqual(r.sections.map((s) => s.host), [
+    "issues.bounded.tools", "claims.bounded.tools", "prs.bounded.tools",
+  ]);
+  assert.equal(r.ok, true);
+});
+
+// The whole point of composing rather than re-counting: the overview's number
+// and the number on the host it links to are the same expression.
+test("every count comes from the selector that owns it", () => {
+  const r = selectOverview(outcomes());
+  const by = Object.fromEntries(r.sections.map((s) => [s.key, s]));
+  assert.equal(by.issues.count, select(boardFeed).items.length);
+  assert.equal(by.claims.count, selectClaims(boardFeed).count);
+  assert.equal(by.prs.count, 1);
+});
+
+test("a section that could not be read keeps its slot and its reason", () => {
+  const r = selectOverview(outcomes({ prs: bad("feed responded 500 Internal Server Error") }));
+  const prs = r.sections.find((s) => s.key === "prs");
+  assert.equal(prs.ok, false);
+  assert.equal(prs.count, null);          // never 0 — that would be a claim it cannot make
+  assert.deepEqual(prs.items, []);
+  assert.match(prs.reason, /500/);
+  assert.equal(r.ok, false);              // the page as a whole did not succeed
+  // and the sections that DID answer are untouched
+  assert.equal(r.sections.find((s) => s.key === "issues").ok, true);
+});
+
+// Quoting the newest stamp would let a live PR feed vouch for a board projection
+// that stopped yesterday.
+test("the overview's age is the OLDEST readable stamp, not the newest", () => {
+  const r = selectOverview({
+    issues: ok(select(feed([], { generated_at: "2026-08-25T10:00:00Z" }))),
+    claims: ok(selectClaims(feed([], { generated_at: "2026-08-25T10:00:00Z" }))),
+    prs: ok(selectPrs(prFeed([], { generated_at: "2026-08-27T10:00:00Z" }))),
+  });
+  assert.equal(r.generated_at, "2026-08-25T10:00:00Z");
+});
+
+test("an overview with nothing readable states no age rather than inventing one", () => {
+  const r = selectOverview({ issues: bad("x"), claims: bad("x"), prs: bad("x") });
+  assert.equal(r.generated_at, null);
+  assert.equal(r.ok, false);
+});
+
+test("each section shows only its head, and says how many it counted", () => {
+  const many = feed(Array.from({ length: 12 }, (_, n) =>
+    item({ number: n, fields: { Status: "Todo", Score: n } })));
+  const r = selectOverview({
+    issues: ok(select(many)), claims: ok(selectClaims(many)), prs: ok(selectPrs(prFeed([]))),
+  });
+  const issues = r.sections.find((s) => s.key === "issues");
+  assert.equal(issues.items.length, OVERVIEW_HEAD);
+  assert.equal(issues.count, 12);
+  assert.equal(r.head, OVERVIEW_HEAD);
 });
