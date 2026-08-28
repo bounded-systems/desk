@@ -13,16 +13,34 @@
   // why other lanes' redeploys "proved" domains worked while first attaches still failed —
   // so the broker entry for this repo must carry `domains` (the zone-READ groups), not just
   // `scripts`. See WORKERS_DEPLOY_PERMISSION_VARS in the broker.
+  //
+  // FOUR HOSTS, ONE WORKER, selected by hostname in src/worker.js — one question
+  // per host (#7). Splitting them into four Workers would mean four deploys, four
+  // broker entries and four chances for the selection rules to drift apart; the
+  // rules are the product, so they stay in one place and the hostname picks the
+  // page. Each of `issues` and `claims` is a FIRST ATTACH on the next deploy, so
+  // that run needs the `domains` group the broker entry already carries (see the
+  // note above — this is exactly the first-attach asymmetry).
   "routes": [
     {
+      // The front door: an overview of all three, and the default for any other
+      // hostname this Worker answers on.
       "pattern": "desk.bounded.tools",
       "custom_domain": true
     },
     {
-      // prs.bounded.tools (#480/#713) — the open-PR list, same Worker, selected
-      // by hostname. The first deploy after this lands ATTACHES the domain, so
-      // that run needs the `domains` group the broker entry already carries
-      // (see the note above — this is exactly the first-attach asymmetry).
+      // The ranked claimable queue — what used to be served at desk (#7).
+      "pattern": "issues.bounded.tools",
+      "custom_domain": true
+    },
+    {
+      // What is already spoken for. Split off the issue queue (#7) so that page
+      // answers only "what should I pick up".
+      "pattern": "claims.bounded.tools",
+      "custom_domain": true
+    },
+    {
+      // prs.bounded.tools (#480/#713) — the open-PR list.
       "pattern": "prs.bounded.tools",
       "custom_domain": true
     }
@@ -45,6 +63,6 @@
     "DESK_LIMIT": "25"
   }
 
-  // Route + DNS for desk.bounded.tools are manual [settings] — the host does not
-  // resolve today. Add the custom domain to this Worker once the name exists.
+  // Route + DNS are created by the custom-domain attach above; issues. and claims.
+  // do not resolve until the first deploy carrying this file runs.
 }

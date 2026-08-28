@@ -1,17 +1,30 @@
-// What counts as claimable work, and in what order.
+// What each host's page is a selection OF, and in what order.
 //
-// This is a FAITHFUL PORT of scripts/trim-front-desk.mjs from bounded-systems/site,
-// which is itself the same line front-desk.sh holds for a session. The three
-// readers of the board — the shell script, the site generator, and this app —
-// must agree about what "claimable" means, or the page and the session that
-// reads it are looking at different boards while using the same word.
+// One Worker serves four hosts, and each one answers exactly one question:
+//
+//   issues.bounded.tools   what is worth picking up          select()
+//   claims.bounded.tools   what someone is already on        selectClaims()
+//   prs.bounded.tools      what is open and awaiting a check selectPrs()
+//   desk.bounded.tools     all three at a glance             selectOverview()
 //
 // THE RANK IS THE BOARD'S. Nothing here scores. `Score` is carried through
 // unchanged and only sorted on; a ranking computed here would be a different
-// board wearing the same name.
+// board wearing the same name. Where a page needs an order the board does not
+// give — the claims list, the PR list — the order is a stated grouping over the
+// board's own fields, never a number this file made up.
+//
+// EVERY SELECTOR NAMES THE FEED IT ACCEPTS, and refuses every other. The
+// PRIVATE projection carries private repos' issue titles; only the filtered
+// `front-desk-public` copy may reach a public page. Checking the feed's own
+// name rather than trusting the configured URL is what makes a mistyped
+// FEED_URL a 502 instead of a leak — and it is equally what stops the desk
+// feed being rendered as PRs, which would present issues as changes.
 
-/** Default number of rows rendered. The board is long; the head of it is the point. */
+/** Default number of rows the issue queue renders. The board is long; the head of it is the point. */
 export const DEFAULT_LIMIT = 25;
+
+/** Rows each overview section shows before deferring to that section's own host. */
+export const OVERVIEW_HEAD = 5;
 
 const status = (i) => (i.fields || {}).Status || null;
 const scoreOf = (i) => {
@@ -26,8 +39,22 @@ const scoreOf = (i) => {
  */
 export class FeedError extends Error {}
 
+/** The shared guard: this must be the public board feed, and it must be dateable. */
+function requireBoardFeed(feed, name, whatIsRendered) {
+  if (!feed || feed.feed !== name) {
+    throw new FeedError(
+      `expected the '${name}' feed, got '${feed?.feed ?? "(unnamed)"}'. ` + whatIsRendered,
+    );
+  }
+  if (!feed.generated_at || Number.isNaN(Date.parse(feed.generated_at))) {
+    throw new FeedError(
+      "the feed carries no parseable generated_at — refusing to render a page that cannot state its age.",
+    );
+  }
+}
+
 /**
- * Reduce the public feed to the claimable head of the board.
+ * Reduce the public feed to the claimable head of the board — issues.bounded.tools.
  *
  * Each exclusion is a rule, not a filter someone tuned until the list looked
  * right:
@@ -37,22 +64,18 @@ export class FeedError extends Error {}
  *   - numeric Score       — the board's own ranking. An unscored row cannot be
  *                           placed against the others, and inventing a position
  *                           for it would be inventing a ranking.
+ *
+ * `withheld.claimed` is still COUNTED here even though the issues page no longer
+ * prints it: the exclusion is real, /board.json consumers read it, and the
+ * claims page is computed from the same number. What changed is where a reader
+ * is sent to see it — not whether this selector knows it.
  */
 export function select(feed, limit = DEFAULT_LIMIT) {
-  // The PRIVATE projection carries private repos' issue titles. Only the
-  // filtered feed may reach a public page, and the feed says which one it is —
-  // so check, rather than trust the URL someone configured.
-  if (!feed || feed.feed !== "front-desk-public") {
-    throw new FeedError(
-      `expected the 'front-desk-public' feed, got '${feed?.feed ?? "(unnamed)"}'. ` +
-        "The private projection carries private titles and must never be rendered here.",
-    );
-  }
-  if (!feed.generated_at || Number.isNaN(Date.parse(feed.generated_at))) {
-    throw new FeedError(
-      "the feed carries no parseable generated_at — refusing to render a board that cannot state its age.",
-    );
-  }
+  requireBoardFeed(
+    feed,
+    "front-desk-public",
+    "The private projection carries private titles and must never be rendered here.",
+  );
 
   const items = Array.isArray(feed.items) ? feed.items : [];
   const todo = items.filter((i) => status(i) === "Todo");
@@ -85,6 +108,79 @@ export function select(feed, limit = DEFAULT_LIMIT) {
   };
 }
 
+// A claim is only live while the work is: the board's Status and the issue's own
+// state each independently retire one. Both are checked because they can
+// disagree — a row can be closed on GitHub before the board sweep moves it to
+// Done — and a claims page that lists finished work is a page nobody trusts
+// twice. The retired ones are counted, not dropped silently.
+const isFinished = (i) => status(i) === "Done" || i.issue_state === "CLOSED";
+
+// The one ordering decision on this page, and it is a GROUPING over the board's
+// own Status field rather than a rank: what someone is actively on, then what is
+// stuck, then what is spoken for but not started. Within a group, repo then
+// number — stable, and not a claim about importance. The board scores
+// claimABLE work; once a thing is claimed the score answers a question nobody
+// is asking here.
+const CLAIM_ORDER = ["In Progress", "Blocked", "Todo"];
+const claimRank = (i) => {
+  const r = CLAIM_ORDER.indexOf(status(i));
+  return r === -1 ? CLAIM_ORDER.length : r;
+};
+
+/**
+ * Reduce the public feed to what is currently claimed — claims.bounded.tools.
+ *
+ * Reads the SAME `front-desk-public` feed as the issue queue, because a claim is
+ * a fact the board already carries about a row: splitting the hosts splits the
+ * question, not the source of truth. Two feeds asserting who is on what is two
+ * things to disagree.
+ *
+ * WHAT THIS CANNOT SAY. The public filter deliberately does not carry
+ * `assignees` — publishing a roster of who is working on what is exactly what it
+ * refused. So this page knows THAT a row is claimed and never BY WHOM, and the
+ * render says so rather than letting a reader assume the names were omitted for
+ * space.
+ */
+export function selectClaims(feed) {
+  requireBoardFeed(
+    feed,
+    "front-desk-public",
+    "The private projection carries private titles and must never be rendered here.",
+  );
+
+  const items = Array.isArray(feed.items) ? feed.items : [];
+  const claimed = items.filter((i) => i.claimed === true);
+  const live = claimed.filter((i) => !isFinished(i));
+  const sorted = [...live].sort(
+    (a, b) =>
+      claimRank(a) - claimRank(b) ||
+      String(a.repo).localeCompare(String(b.repo)) ||
+      (a.number ?? 0) - (b.number ?? 0),
+  );
+
+  return {
+    generated_at: feed.generated_at,
+    count: sorted.length,
+    withheld: {
+      // Claims on work the board calls Done, or on issues GitHub calls closed.
+      // Printed by the page: a claim count that quietly included finished work
+      // would drift upward forever and mean nothing.
+      finished: claimed.length - live.length,
+    },
+    // Counted separately because "someone is on it" and "someone has it but has
+    // not started" are different answers to "is anyone moving on this".
+    in_progress: sorted.filter((i) => status(i) === "In Progress").length,
+    items: sorted.map((i) => ({
+      repo: i.repo,
+      number: i.number,
+      title: i.title,
+      url: i.url,
+      status: status(i),
+      labels: i.labels || [],
+    })),
+  };
+}
+
 /**
  * Reduce the PR feed to the list prs.bounded.tools renders (#480/#713).
  *
@@ -96,17 +192,11 @@ export function select(feed, limit = DEFAULT_LIMIT) {
  * fails closed rather than rendering the wrong feed.
  */
 export function selectPrs(feed) {
-  if (!feed || feed.feed !== "front-desk-prs-public") {
-    throw new FeedError(
-      `expected the 'front-desk-prs-public' feed, got '${feed?.feed ?? "(unnamed)"}'. ` +
-        "Only the PR feed may be rendered here — any other feed is the wrong page's data.",
-    );
-  }
-  if (!feed.generated_at || Number.isNaN(Date.parse(feed.generated_at))) {
-    throw new FeedError(
-      "the feed carries no parseable generated_at — refusing to render a list that cannot state its age.",
-    );
-  }
+  requireBoardFeed(
+    feed,
+    "front-desk-prs-public",
+    "Only the PR feed may be rendered here — any other feed is the wrong page's data.",
+  );
 
   const items = Array.isArray(feed.items) ? feed.items : [];
   const sorted = [...items].sort((a, b) =>
@@ -126,5 +216,74 @@ export function selectPrs(feed) {
       labels: i.labels || [],
       claimed: !!i.claimed,
     })),
+  };
+}
+
+/**
+ * Compose the three selections into the front door — desk.bounded.tools.
+ *
+ * TAKES OUTCOMES, NOT FEEDS, and that is the point: each section is fetched and
+ * selected independently, so this function is where "one of the three could not
+ * be read" is REPRESENTED rather than thrown. An overview that 502s in full
+ * because the PR feed hiccuped tells a reader nothing about the two feeds that
+ * answered; an overview that silently prints `0 open` for the feed it could not
+ * read tells them something false. So a failed section keeps its slot, carries
+ * its reason, and sets `ok: false` for the page — which the worker serves with a
+ * 5xx, because a page that is missing a third of what it claims to summarise has
+ * not succeeded.
+ *
+ * Each outcome is `{ ok: true, value }` or `{ ok: false, reason }`.
+ *
+ * NOTHING IS RE-COUNTED HERE. Every number comes from the selector that owns it,
+ * so the overview and the host it links to cannot disagree — the only way to
+ * make one page's "12 claimed" mean the same as another's is for both to be the
+ * same expression.
+ */
+export function selectOverview({ issues, claims, prs }, head = OVERVIEW_HEAD) {
+  const section = (key, host, outcome, shape) =>
+    outcome?.ok
+      ? { key, host, ok: true, ...shape(outcome.value), generated_at: outcome.value.generated_at }
+      : { key, host, ok: false, reason: outcome?.reason ?? "not read", count: null, items: [] };
+
+  const sections = [
+    section("issues", "issues.bounded.tools", issues, (d) => ({
+      // The claimable count, not the board's Todo total: this row links to a page
+      // that shows exactly these, and the two numbers must be the same number.
+      count: d.withheld.todo_total - d.withheld.claimed - d.withheld.pull_requests,
+      shown: d.items.length,
+      items: d.items.slice(0, head).map((i) => ({
+        repo: i.repo, number: i.number, title: i.title, url: i.url, note: i.score.toFixed(2),
+      })),
+    })),
+    section("claims", "claims.bounded.tools", claims, (d) => ({
+      count: d.count,
+      shown: d.items.length,
+      items: d.items.slice(0, head).map((i) => ({
+        repo: i.repo, number: i.number, title: i.title, url: i.url, note: i.status,
+      })),
+    })),
+    section("prs", "prs.bounded.tools", prs, (d) => ({
+      count: d.count,
+      shown: d.items.length,
+      items: d.items.slice(0, head).map((i) => ({
+        repo: i.repo, number: i.number, title: i.title, url: i.url, note: `#${i.number}`,
+      })),
+    })),
+  ];
+
+  // The OLDEST readable stamp, not the newest. The page shows three feeds side
+  // by side, and the only freshness claim true of all of them is the age of the
+  // stalest one — quoting the newest would let a live PR feed vouch for a board
+  // projection that stopped yesterday.
+  const stamps = sections
+    .filter((s) => s.ok && s.generated_at)
+    .map((s) => Date.parse(s.generated_at))
+    .filter((t) => !Number.isNaN(t));
+
+  return {
+    ok: sections.every((s) => s.ok),
+    generated_at: stamps.length ? new Date(Math.min(...stamps)).toISOString().replace(/\.\d{3}Z$/, "Z") : null,
+    head,
+    sections,
   };
 }

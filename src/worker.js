@@ -1,4 +1,4 @@
-// The Front Desk, live.
+// The Front Desk, live — four hosts, one Worker.
 //
 // A static page can only ever state the age it had when it was built, which is
 // why the site's generated /desk carried a hand-piped snapshot and eventually
@@ -10,18 +10,50 @@
 // So: fetch the already-filtered public feed per request, cache it briefly at
 // the edge, and render. The board's own ranking is carried through untouched.
 //
+// ONE QUESTION PER HOST, selected by hostname so a reader cannot reach the
+// wrong page by path:
+//
+//   issues.bounded.tools   what is worth picking up
+//   claims.bounded.tools   what is already spoken for
+//   prs.bounded.tools      what is open and awaiting a check
+//   desk.bounded.tools     all three at a glance, and the default for any other
+//                          hostname this Worker answers on (a workers.dev
+//                          preview above all) — the front door is the safe thing
+//                          to serve when the host does not say which page it is.
+//
 // FAIL CLOSED. Every failure — feed unreachable, wrong feed, undatable snapshot
 // — renders "the board could not be read" with a 5xx, never an empty list. A
 // board that cannot be read and a board with nothing on it are different
-// sentences, and only one of them is ever true.
+// sentences, and only one of them is ever true. The overview is the one page
+// that can be PARTLY unreadable, and it fails closed per section: the sections
+// that answered are rendered, the one that did not says so in its own words, and
+// the whole page is still served with a 5xx, because a summary missing a third
+// of what it summarises has not succeeded.
 
-import { select, selectPrs, DEFAULT_LIMIT, FeedError } from "./select.js";
-import { renderBoard, renderPrs, renderUnavailable } from "./render.js";
+import {
+  select,
+  selectClaims,
+  selectPrs,
+  selectOverview,
+  DEFAULT_LIMIT,
+  FeedError,
+} from "./select.js";
+import {
+  renderIssues,
+  renderClaims,
+  renderPrs,
+  renderOverview,
+  renderUnavailable,
+} from "./render.js";
 
-/** The hostname that serves the PR list instead of the board (#480/#713). */
-const PRS_HOST_DEFAULT = "prs.bounded.tools";
+/** Hostnames, and the env var that may override each for a preview or a rename. */
+const HOSTS = {
+  issues: { env: "ISSUES_HOST", default: "issues.bounded.tools" },
+  claims: { env: "CLAIMS_HOST", default: "claims.bounded.tools" },
+  prs: { env: "PRS_HOST", default: "prs.bounded.tools" },
+};
 
-/** Seconds the rendered board may be reused at the edge. */
+/** Seconds the rendered page may be reused at the edge. */
 const EDGE_TTL = 60;
 
 const html = (body, status, ttl) =>
@@ -38,6 +70,64 @@ const html = (body, status, ttl) =>
     },
   });
 
+const json = (body, status, ttl) =>
+  new Response(JSON.stringify(body, null, 2) + "\n", {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": status === 200 ? `public, max-age=${ttl}` : "no-store",
+    },
+  });
+
+/** Which page this request is for. Unknown hosts get the front door. */
+function surfaceFor(hostname, env) {
+  for (const [name, h] of Object.entries(HOSTS)) {
+    if (hostname === (env[h.env] || h.default)) return name;
+  }
+  return "overview";
+}
+
+/**
+ * Fetch one feed. Returns `{ ok: true, value }` or `{ ok: false, reason }` —
+ * never throws, because the overview needs a failure it can RENDER rather than
+ * one that takes the whole page down.
+ */
+async function readFeed(url, what) {
+  if (!url) return { ok: false, reason: `${what} is not configured for this Worker.` };
+  try {
+    const res = await fetch(url, {
+      headers: { accept: "application/json", "user-agent": "bounded-systems-desk" },
+      // Collapse the stampede: many readers in the same minute cost one origin
+      // read, and the rendered page is cached for the same window anyway.
+      cf: { cacheTtl: EDGE_TTL, cacheEverything: true },
+    });
+    if (!res.ok) return { ok: false, reason: `feed responded ${res.status} ${res.statusText}` };
+    return { ok: true, value: await res.json() };
+  } catch (err) {
+    return { ok: false, reason: `feed unreachable: ${err.message}` };
+  }
+}
+
+/**
+ * Run a selector over a feed outcome, keeping the outcome shape.
+ *
+ * A FeedError is the guard doing its job (wrong feed, undatable snapshot);
+ * anything else is a bug here. Both are "cannot stand behind this", so both fail
+ * closed — but they stay distinguishable in the reason line, because "the feed
+ * is the wrong one" and "this code threw" send you to different places.
+ */
+function selected(feed, fn) {
+  if (!feed.ok) return feed;
+  try {
+    return { ok: true, value: fn(feed.value) };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof FeedError ? err.message : `unexpected: ${err.message}`,
+    };
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -51,74 +141,56 @@ export default {
       return new Response("ok\n", { status: 200, headers: { "cache-control": "no-store" } });
     }
 
-    // One Worker, two hosts: the desk renders the claimable board, the prs
-    // host renders the open-PR list (#480/#713). Selected by hostname so a
-    // reader cannot reach the wrong page by path — and each host has its own
-    // feed, each feed names itself, and each selector refuses the other's.
-    const isPrs = url.hostname === (env.PRS_HOST || PRS_HOST_DEFAULT);
-
-    // No destination is baked in: where the filtered feed is published is a
-    // maintainer decision (see site#241), so it arrives as configuration and the
-    // worker refuses rather than guessing.
-    const feedUrl = isPrs ? env.PRS_FEED_URL : env.FEED_URL;
-    if (!feedUrl) {
-      return html(
-        renderUnavailable(
-          `${isPrs ? "PRS_FEED_URL" : "FEED_URL"} is not configured for this Worker.`,
-        ),
-        503,
-        EDGE_TTL,
-      );
-    }
-
+    const surface = surfaceFor(url.hostname, env);
+    const wantsJson = url.pathname === "/board.json";
     const limit = Number(env.DESK_LIMIT) > 0 ? Number(env.DESK_LIMIT) : DEFAULT_LIMIT;
 
-    let feed;
-    try {
-      const res = await fetch(feedUrl, {
-        headers: { accept: "application/json", "user-agent": "bounded-systems-desk" },
-        // Collapse the stampede: many readers in the same minute cost one origin
-        // read, and the rendered page is cached for the same window anyway.
-        cf: { cacheTtl: EDGE_TTL, cacheEverything: true },
+    // ── the front door: all three, each fetched and judged on its own ────────
+    if (surface === "overview") {
+      // No destination is baked in: where the filtered feeds are published is a
+      // maintainer decision (see site#241), so they arrive as configuration and
+      // an absent one is reported rather than guessed at.
+      const [board, prsFeed] = await Promise.all([
+        readFeed(env.FEED_URL, "FEED_URL"),
+        readFeed(env.PRS_FEED_URL, "PRS_FEED_URL"),
+      ]);
+      // Both issue-side sections read the SAME feed — one origin read, and the
+      // two pages can never disagree about which snapshot they are describing.
+      const overview = selectOverview({
+        issues: selected(board, (f) => select(f, limit)),
+        claims: selected(board, selectClaims),
+        prs: selected(prsFeed, selectPrs),
       });
-      if (!res.ok) {
-        return html(
-          renderUnavailable(`feed responded ${res.status} ${res.statusText}`),
-          502,
-          EDGE_TTL,
-        );
-      }
-      feed = await res.json();
-    } catch (err) {
-      return html(renderUnavailable(`feed unreachable: ${err.message}`), 502, EDGE_TTL);
+      const status = overview.ok ? 200 : 502;
+      return wantsJson
+        ? json(overview, status, EDGE_TTL)
+        : html(renderOverview(overview, Date.now(), EDGE_TTL), status, EDGE_TTL);
     }
 
-    let board;
-    try {
-      board = isPrs ? selectPrs(feed) : select(feed, limit);
-    } catch (err) {
-      // A FeedError is the guard doing its job (wrong feed, undatable snapshot);
-      // anything else is a bug here. Both are "cannot stand behind this", so both
-      // fail closed — but they are distinguishable in the reason line.
-      const why = err instanceof FeedError ? err.message : `unexpected: ${err.message}`;
-      return html(renderUnavailable(why), 502, EDGE_TTL);
+    // ── a single-question host ───────────────────────────────────────────────
+    const feedVar = surface === "prs" ? "PRS_FEED_URL" : "FEED_URL";
+    const feed = await readFeed(env[feedVar], feedVar);
+    const outcome = selected(
+      feed,
+      surface === "issues" ? (f) => select(f, limit) : surface === "claims" ? selectClaims : selectPrs,
+    );
+
+    if (!outcome.ok) {
+      // A missing config is the Worker's own fault (503); an unreadable or wrong
+      // feed is upstream (502). Both render the same page — it is the reason
+      // line that tells them apart, and a reader who cannot see the status still
+      // gets the sentence.
+      const status = env[feedVar] ? 502 : 503;
+      return wantsJson
+        ? json({ error: outcome.reason }, status, EDGE_TTL)
+        : html(renderUnavailable(outcome.reason), status, EDGE_TTL);
     }
 
     // JSON for anything that would rather read the board than look at it.
-    if (url.pathname === "/board.json") {
-      return new Response(JSON.stringify(board, null, 2) + "\n", {
-        status: 200,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": `public, max-age=${EDGE_TTL}`,
-        },
-      });
-    }
+    if (wantsJson) return json(outcome.value, 200, EDGE_TTL);
 
-    return html(
-      isPrs ? renderPrs(board, Date.now(), EDGE_TTL) : renderBoard(board, Date.now(), EDGE_TTL),
-      200,
-      EDGE_TTL,
-    );
+    const render =
+      surface === "issues" ? renderIssues : surface === "claims" ? renderClaims : renderPrs;
+    return html(render(outcome.value, Date.now(), EDGE_TTL), 200, EDGE_TTL);
   },
 };

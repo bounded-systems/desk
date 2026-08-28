@@ -1,6 +1,7 @@
 name: deploy
 
-# Deploy the desk Worker to desk.bounded.tools.
+# Deploy the desk Worker to its four hosts — desk, issues, claims and prs
+# .bounded.tools (#7). One Worker, one deploy; the hostname picks the page.
 #
 # NO STORED CLOUDFLARE CREDENTIAL. The token is minted per run from the OIDC broker's
 # /deploy/desk tier, which pins this workflow ref, this owner, this audience and this
@@ -94,7 +95,7 @@ jobs:
           # nothing. The approval is the Face ID at the URL.
           issue_url="$(gh issue create --repo "$GITHUB_REPOSITORY" \
             --title "Face ID: approve desk deploy (run ${GITHUB_RUN_ID})" \
-            --body "$(printf 'A desk-deploy run wants to mint an account-wide Workers:Edit token and deploy the Front Desk board at desk.bounded.tools.\n\nApprove with your passkey (15-minute window):\n\n%s\n\nThis issue is a notification only — comments here authorize nothing (infra#480 retired the comment gate). Run: https://github.com/%s/actions/runs/%s' "$approve_url" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")")"
+            --body "$(printf 'A desk-deploy run wants to mint an account-wide Workers:Edit token and deploy the Front Desk pages at desk/issues/claims/prs.bounded.tools.\n\nApprove with your passkey (15-minute window):\n\n%s\n\nThis issue is a notification only — comments here authorize nothing (infra#480 retired the comment gate). Run: https://github.com/%s/actions/runs/%s' "$approve_url" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")")"
           echo "issue_url=$issue_url" >> "$GITHUB_OUTPUT"
           echo "ceremony open — approve at $approve_url"
 
@@ -225,25 +226,41 @@ jobs:
           echo "deployed version ${ver:-<unparsed>}"
 
       # A SUCCESSFUL `wrangler deploy` IS NOT EVIDENCE THAT THE EDGE SERVES IT. On a first
-      # attach the DNS record has to propagate before desk.bounded.tools answers at all, so
-      # this polls rather than asserting once — and it asserts the board actually renders,
-      # not merely that something returned 200. `/healthz` deliberately does NOT touch the
-      # feed, so a 200 there with a failing board would be a false green; the board itself
-      # is what gets probed.
-      - name: Read-back probe — does the edge serve the board?
+      # attach the DNS record has to propagate before the host answers at all, so this polls
+      # rather than asserting once — and it asserts the page actually renders, not merely
+      # that something returned 200. `/healthz` deliberately does NOT touch the feed, so a
+      # 200 there with a failing page would be a false green; the pages themselves are what
+      # get probed.
+      #
+      # EVERY HOST IS PROBED, and each one for a marker ONLY THAT HOST CAN PRODUCE (#7).
+      # Four hosts on one Worker means a routing mistake serves a reader the wrong page
+      # while every URL still answers 200 — probing one host, or probing all four for a
+      # shared string, would go green on exactly that bug. `issues` and `claims` are also
+      # FIRST ATTACHES, which is the case most likely to fail here and least likely to be
+      # reproducible afterwards, so they are probed with the same patience as the rest.
+      - name: Read-back probe — does the edge serve each host its own page?
         run: |
           set -euo pipefail
-          deadline=$(( $(date +%s) + 600 ))
-          while :; do
-            code="$(curl -sS -o /tmp/probe.html -w '%{http_code}' --max-time 20 https://desk.bounded.tools/ || echo 000)"
-            if [ "$code" = "200" ] && grep -q 'Board projected at' /tmp/probe.html; then
-              echo "✓ desk.bounded.tools serves the board"
-              exit 0
-            fi
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::read-back timed out after 600s: the edge answers HTTP ${code} and did not render a dated board. The wrangler deploy may have succeeded — what this run cannot claim is that desk.bounded.tools is SERVING it." >&2
-              head -c 400 /tmp/probe.html >&2 || true
-              exit 1
-            fi
-            sleep 15
-          done
+          probe() {
+            host="$1"; want="$2"
+            deadline=$(( $(date +%s) + 600 ))
+            while :; do
+              code="$(curl -sS -o "/tmp/probe-${host}.html" -w '%{http_code}' --max-time 20 "https://${host}.bounded.tools/" || echo 000)"
+              if [ "$code" = "200" ] && grep -q "$want" "/tmp/probe-${host}.html"; then
+                echo "✓ ${host}.bounded.tools serves its own page"
+                return 0
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "::error::read-back timed out after 600s: ${host}.bounded.tools answers HTTP ${code} and did not render '${want}'. The wrangler deploy may have succeeded — what this run cannot claim is that this host is SERVING it." >&2
+                head -c 400 "/tmp/probe-${host}.html" >&2 || true
+                return 1
+              fi
+              sleep 15
+            done
+          }
+          # The <h1> is the marker: it is exactly what hostname routing decides, and it
+          # differs on all four. A stamp line would not — every page prints one.
+          probe desk   '<h1>Desk</h1>'
+          probe issues '<h1>Issues</h1>'
+          probe claims '<h1>Claims</h1>'
+          probe prs    '<h1>PRs</h1>'
