@@ -163,20 +163,34 @@ test("a claim on finished work is not a live claim, and is counted", () => {
   assert.equal(r.withheld.finished, 2);
 });
 
-test("selectClaims groups by the board's Status, then repo, then number", () => {
+test("selectClaims orders by repo then number, and ignores Status (#10)", () => {
+  // Status values are deliberately adversarial here: under the old grouping the
+  // In Progress row sorted first. It must not any more — the field was wrong on
+  // all five live rows checked on 2026-08-28, so ordering by it sorted noise.
   const r = selectClaims(feed([
     claimed({ repo: "bounded-systems/b", number: 5, fields: { Status: "Todo" } }),
     claimed({ repo: "bounded-systems/a", number: 9, fields: { Status: "In Progress" } }),
     claimed({ repo: "bounded-systems/a", number: 2, fields: { Status: "Blocked" } }),
     claimed({ repo: "bounded-systems/a", number: 1, fields: { Status: "Todo" } }),
   ]));
-  assert.deepEqual(r.items.map((i) => [i.status, i.repo, i.number]), [
-    ["In Progress", "bounded-systems/a", 9],
-    ["Blocked", "bounded-systems/a", 2],
-    ["Todo", "bounded-systems/a", 1],
-    ["Todo", "bounded-systems/b", 5],
+  assert.deepEqual(r.items.map((i) => [i.repo, i.number]), [
+    ["bounded-systems/a", 1],
+    ["bounded-systems/a", 2],
+    ["bounded-systems/a", 9],
+    ["bounded-systems/b", 5],
   ]);
-  assert.equal(r.in_progress, 1);
+  assert.equal(r.in_progress, undefined, "in_progress must be gone from the JSON surface");
+});
+
+// `Done` stays load-bearing: it is a terminal signal, not a report of motion,
+// and it is what holds finished claims out of the list.
+test("selectClaims still holds back Status: Done after the ordering change", () => {
+  const r = selectClaims(feed([
+    claimed({ repo: "bounded-systems/a", number: 1, fields: { Status: "Done" } }),
+    claimed({ repo: "bounded-systems/a", number: 2, fields: { Status: "Todo" } }),
+  ]));
+  assert.deepEqual(r.items.map((i) => i.number), [2]);
+  assert.equal(r.withheld.finished, 1);
 });
 
 // The public filter deliberately drops `assignees`. The selector must not invent
@@ -184,7 +198,7 @@ test("selectClaims groups by the board's Status, then repo, then number", () => 
 test("selectClaims carries no claimant — the feed does not have one", () => {
   const r = selectClaims(feed([claimed()]));
   assert.deepEqual(Object.keys(r.items[0]).sort(), [
-    "labels", "number", "repo", "status", "title", "url",
+    "labels", "number", "repo", "title", "url",
   ]);
 });
 
