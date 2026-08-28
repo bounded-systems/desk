@@ -183,8 +183,12 @@ test("the overview shows all three, each linked to the host that owns it", () =>
     ["claims.bounded.tools", "claims row"],
     ["prs.bounded.tools", "prs row"],
   ]) {
-    assert.match(html, new RegExp(`href="https://${h.replace(/\./g, "\\.")}"`));
-    assert.match(html, new RegExp(row));
+    // Literal substring checks, not regexes built from data: hand-escaping a
+    // string into a pattern is a thing to get wrong (CodeQL caught exactly that
+    // here — the `.` was escaped and the backslash was not), and every one of
+    // these assertions only ever wanted an exact match anyway.
+    assert.ok(html.includes(`href="https://${h}"`), h);
+    assert.ok(html.includes(row), row);
   }
 });
 
@@ -262,11 +266,14 @@ test("each page links the other hosts and never links itself", () => {
     [renderPrs(prs(), AT, 60), "prs"],
   ]) {
     for (const other of ["desk", "issues", "claims", "prs"].filter((h) => h !== self)) {
-      assert.match(html, new RegExp(`href="https://${other}\\.bounded\\.tools"`), `${self} → ${other}`);
+      assert.ok(html.includes(`href="https://${other}.bounded.tools"`), `${self} → ${other}`);
     }
-    assert.doesNotMatch(
-      html,
-      new RegExp(`Also:[^<]*<a href="https://${self}\\.bounded\\.tools"`),
+    // Scope the negative to the cross-link footer line — the rest of the page
+    // may legitimately link its own host — then check it literally.
+    const also = html.match(/Also:.*?<\/p>/s)?.[0];
+    assert.ok(also, `${self} renders no cross-link footer`);
+    assert.ok(
+      !also.includes(`href="https://${self}.bounded.tools"`),
       `${self} must not link itself in the footer`,
     );
   }
