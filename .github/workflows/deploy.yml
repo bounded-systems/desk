@@ -21,17 +21,14 @@ name: deploy
 # THE GATE IS A FACE ID CEREMONY, not a comment (infra#480): the run opens a ceremony
 # whose challenge pins THIS run on THIS commit, notifies the approver with the approve
 # URL, polls for the authorization, and redeems it — fail closed — before any credential
-# is minted. break_glass keeps the retired comment gate solely for a keeper that cannot
-# serve a ceremony, and brands the run summary when used.
+# is minted. There is NO break-glass (#18, following .github#264 and .github-private#735):
+# while the keeper is down this lane does not run. It was an `await-approval` comment gate
+# until infra#480, and kept a break_glass fallback to it until #18 removed that too — #235
+# established the comment gate cannot tell the dispatcher from the approver, so the fallback
+# was a single-boolean bypass to a mechanism known not to work.
 on:
   workflow_dispatch:
     inputs:
-      break_glass:
-        description: >-
-          Fall back to the RETIRED comment-approval gate because the keeper itself cannot
-          serve a ceremony. Loud by design; do not use to skip a Face ID.
-        type: boolean
-        default: false
 
 permissions:
   id-token: write # OIDC → broker /deploy/desk
@@ -72,7 +69,6 @@ jobs:
       # let configuration move the ceremony somewhere else.
       - name: Open the Face ID ceremony
         id: ceremony
-        if: ${{ !inputs.break_glass }}
         env:
           KEEPER_URL: https://keeper.bounded.tools
           GH_TOKEN: ${{ github.token }}
@@ -83,7 +79,7 @@ jobs:
           start="$(curl -sfS --max-time 20 -X POST -H 'content-type: application/json' \
             -d "{\"requestType\":\"bounded.deploy-request.v1\",\"request\":$req}" \
             "$KEEPER_URL/authorize/start")" || {
-            echo "::error::the keeper refused to open a ceremony. If keeper.bounded.tools is itself down or broken, re-dispatch with break_glass: true — and say so in the run."
+            echo "::error::the keeper refused to open a ceremony. There is no break-glass (#18): this lane does not run until keeper.bounded.tools is back."
             exit 1
           }
           ceremony="$(jq -r '.ceremonyId // empty' <<<"$start")"
@@ -100,7 +96,6 @@ jobs:
           echo "ceremony open — approve at $approve_url"
 
       - name: Wait for the Face ID, then redeem — fail closed
-        if: ${{ !inputs.break_glass }}
         env:
           KEEPER_URL: https://keeper.bounded.tools
           CEREMONY: ${{ steps.ceremony.outputs.ceremony }}
@@ -149,33 +144,12 @@ jobs:
           echo "✓ authorized by $person (credential $cred)"
 
       - name: Close the ceremony notification
-        if: ${{ !inputs.break_glass && steps.ceremony.outputs.issue_url != '' }}
+        if: ${{ steps.ceremony.outputs.issue_url != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_URL: ${{ steps.ceremony.outputs.issue_url }}
         run: gh issue close "$ISSUE_URL" --comment "Authorized by Face ID; ceremony complete." || true
 
-      # BREAK GLASS — the retired comment gate, kept solely for a keeper that
-      # cannot serve a ceremony. Loud in the summary.
-      - name: Await approval (BREAK GLASS — comment gate, retired for routine use)
-        if: ${{ inputs.break_glass }}
-        uses: bounded-systems/await-approval@3eda4124e16463741037ebe8e546419eaaa4824b # main
-        with:
-          approvers: bdelanghe
-          issue-title: "BREAK GLASS: approve desk deploy by comment (keeper cannot serve a ceremony)"
-          issue-body: >
-            A desk-deploy run was dispatched with break_glass: true — the Face ID gate was
-            BYPASSED on the stated grounds that the keeper itself cannot serve a ceremony.
-            If keeper.bounded.tools is actually healthy, deny this and ask why. Mints an
-            account-wide Workers:Edit token on approval.
-
-      - name: Record the break-glass in the summary
-        if: ${{ inputs.break_glass }}
-        run: |
-          {
-            echo "## ⚠ BREAK GLASS deploy"
-            echo "The Face ID gate was bypassed via break_glass — authorized by COMMENT, the retired mechanism. Grounds must be that the keeper itself could not serve a ceremony."
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Mint the deploy token (via OIDC broker /deploy/desk)
         id: token
