@@ -110,19 +110,56 @@ test("selectPrs sorts by repo, newest number first within a repo", () => {
   ]);
 });
 
-test("selectPrs counts, carries claimed, and invents nothing", () => {
+test("selectPrs counts, carries the claim state, and invents nothing", () => {
   const r = selectPrs(prFeed([
-    prItem({ number: 1, claimed: true }),
-    prItem({ number: 2 }),
+    prItem({ number: 1, claim_check: { state: "non_compliant" } }),
+    prItem({ number: 2, claim_check: { state: "compliant" } }),
   ]));
   assert.equal(r.count, 2);
-  assert.equal(r.claimed, 1);
-  assert.equal(r.items.find((i) => i.number === 2).claimed, false);
-  assert.equal(r.items.find((i) => i.number === 1).claimed, true);
+  assert.equal(r.compliance.non_compliant, 1);
+  assert.equal(r.compliance.compliant, 1);
+  assert.equal(r.items.find((i) => i.number === 1).claim, "non_compliant");
   assert.equal(r.generated_at, "2026-08-27T22:00:00Z");
   for (const i of r.items) {
-    assert.deepEqual(Object.keys(i).sort(), ["claimed", "labels", "number", "repo", "title", "url"]);
+    assert.deepEqual(Object.keys(i).sort(), ["claim", "labels", "number", "repo", "title", "url"]);
   }
+});
+
+// EVERY STATE KEEPS A KEY, ZEROS INCLUDED. A count that appears only when
+// non-zero reads as "no data" exactly when a consumer needs to see a zero — and
+// the overview passes these through without recomputing, so a missing key would
+// surface there as `undefined`.
+test("selectPrs reports every state, including the ones nobody holds", () => {
+  const r = selectPrs(prFeed([prItem({ number: 1, claim_check: { state: "compliant" } })]));
+  assert.deepEqual(Object.keys(r.compliance).sort(),
+    ["compliant", "non_compliant", "not_measured", "pending", "unknown"]);
+  assert.equal(r.compliance.not_measured, 0);
+});
+
+// The feed and the Worker deploy independently, so the feed WILL be older than
+// this code for some window. A page that 5xxs through it is a worse answer than
+// one that says it does not know.
+test("a feed with no claim_check degrades to unknown rather than throwing", () => {
+  const r = selectPrs(prFeed([prItem({ number: 1 })]));
+  assert.equal(r.items[0].claim, "unknown");
+  assert.equal(r.compliance.unknown, 1);
+});
+
+// An unrecognised state from a newer producer must NOT silently become a column
+// nobody designed, and must not be counted as compliant.
+test("an unrecognised claim state is read as unknown, not passed through", () => {
+  const r = selectPrs(prFeed([prItem({ number: 1, claim_check: { state: "quantum" } })]));
+  assert.equal(r.items[0].claim, "unknown");
+  assert.equal(r.compliance.unknown, 1);
+  assert.equal(r.compliance.compliant, 0);
+});
+
+// `not_measured` is a repo that has not adopted the gate — .github-private#725's
+// rollout metric. It must never be counted as a compliance failure.
+test("not_measured is counted on its own, never as non_compliant", () => {
+  const r = selectPrs(prFeed([prItem({ number: 1, claim_check: { state: "not_measured" } })]));
+  assert.equal(r.compliance.not_measured, 1);
+  assert.equal(r.compliance.non_compliant, 0);
 });
 
 // ── selectClaims (#7) ────────────────────────────────────────────────────────

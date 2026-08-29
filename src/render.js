@@ -249,17 +249,46 @@ export function renderClaims(d, now = Date.now(), edgeTtlSeconds = 60) {
 
 // ── prs.bounded.tools ────────────────────────────────────────────────────────
 
+/**
+ * How each claim state reads on a row.
+ *
+ * `compliant` is deliberately BLANK. It is the normal case, and annotating it
+ * would make the page a wall of ticks in which the two states worth acting on
+ * do not stand out. A blank suffix here means "the gate verified a live claim".
+ */
+const CLAIM_SUFFIX = {
+  compliant: "",
+  non_compliant: " · no live claim",
+  not_measured: " · not gated",
+  pending: " · checking",
+  unknown: " · unknown",
+};
+
 /** The open PRs, prs.bounded.tools (#480/#713): newest first, per repo. */
 export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
   const description =
     "Every open pull request in the org's public repos — changes awaiting a check, projected from the same board as the desk.";
+  const c = d.compliance;
   const list = d.items.length
     ? d.items
         .map((i) =>
-          row(`#${i.number}`, i.title, i.url, `${shortRepo(i.repo)}${i.claimed ? " · claimed" : ""}`),
+          row(
+            `#${i.number}`,
+            i.title,
+            i.url,
+            `${shortRepo(i.repo)}${CLAIM_SUFFIX[i.claim] ?? CLAIM_SUFFIX.unknown}`,
+          ),
         )
         .join("\n      ")
     : `<div class="stamp"><strong>No open pull requests.</strong> The backlog is drained.</div>`;
+
+  // THE TILE THAT USED TO BE HERE COULD NOT BE NON-ZERO (#15). It counted the
+  // `claimed` label ON THE PULL REQUEST, and the claim convention never writes
+  // one there — both doors write onto an ISSUE. So the page reported "0 claimed"
+  // as though it had measured something. These two count what that tile was
+  // reaching for, and they are kept APART on purpose: `no live claim` is a PR to
+  // fix, `not gated` is a repo that has not adopted the check yet, and adding
+  // them together would make a rollout gap look like a compliance problem.
   return page(
     "PRs — Bounded Systems",
     description,
@@ -268,10 +297,16 @@ export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
       ${stamp(d.generated_at, now, edgeTtlSeconds, "PRs")}
       <div class="desk__tiles">
         ${tile(d.count, "open")}
-        ${tile(d.claimed, "claimed")}
+        ${tile(c.non_compliant, "no live claim")}
+        ${tile(c.not_measured, "not gated")}
       </div>
       ${list}
-      <footer>${elsewhere("prs")}</footer>`,
+      <footer><p class="muted">Every PR should name an issue that carries a live claim, and
+        <code>pr-claim</code> checks it on each pull request. <strong>No live claim</strong> means the
+        gate ran and the PR named no open, claimed issue. <strong>Not gated</strong> is not a failure —
+        the check has not been adopted in that repo yet. A green check says an open, claimed issue was
+        named; it does not establish that the PR is the work of that claim.</p>
+      ${elsewhere("prs")}</footer>`,
   );
 }
 
