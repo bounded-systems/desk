@@ -1,0 +1,32 @@
+# pr-claim — every PR must name an issue that is OPEN and still carries a live
+# claim (.github-private#723). A thin CALLER of the org's reusable check; fix
+# claim behaviour in bounded-systems/.github, never here.
+#
+# REPORT-ONLY, deliberately. This repo is NOT in a ruleset requiring the check,
+# so it reports and cannot block. That is the sequencing .github-private#725
+# argues for: org-wide report-only first, promote later, with notice in between.
+# Turning it into a gate is a separate decision, not a side effect of adopting it.
+#
+# The job name is `pr-claim` so the check run renders as `pr-claim / pr-claim` —
+# a job that calls a reusable workflow reports as `<job> / <job>`. If this repo
+# is ever added to a ruleset, THAT is the context string to require; the bare
+# name never appears and requiring it would block every PR here.
+name: pr-claim
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pr-claim:
+    # Reading a PR and an issue. The reusable can only ever narrow what it is
+    # handed, so the grant has to be made HERE — a caller that forgets these
+    # leaves the check unable to read an issue, which it reports as unreadable
+    # rather than passing.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    uses: bounded-systems/.github/.github/workflows/_pr-claim.yml@b802e472904ca9f347453baca445699d2568cc27 # main
