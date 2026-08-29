@@ -161,28 +161,68 @@ test("nothing claimed says the board is free, not that it is unreadable", () => 
 
 // ── prs.bounded.tools ────────────────────────────────────────────────────────
 
+const compliance = (o = {}) =>
+  ({ compliant: 0, non_compliant: 0, not_measured: 0, pending: 0, unknown: 0, ...o });
+
 const prs = (o = {}) => ({
-  generated_at: "2026-08-25T12:00:00Z", count: 2, claimed: 1,
+  generated_at: "2026-08-25T12:00:00Z", count: 2,
+  compliance: compliance({ non_compliant: 1, compliant: 1 }),
   items: [
-    { repo: "bounded-systems/prx", number: 1001, title: "bump the bun-major group", url: "https://e/1", labels: [], claimed: true },
-    { repo: "bounded-systems/site", number: 9, title: "a <fix>", url: "https://e/2", labels: [], claimed: false },
+    { repo: "bounded-systems/prx", number: 1001, title: "bump the bun-major group", url: "https://e/1", labels: [], claim: "non_compliant" },
+    { repo: "bounded-systems/site", number: 9, title: "a <fix>", url: "https://e/2", labels: [], claim: "compliant" },
   ],
   ...o,
 });
 
-test("the PR page renders rows, the claimed marker, and the age", () => {
+test("the PR page renders rows, the claim state, and the age", () => {
   const html = renderPrs(prs(), AT, 60);
   assert.match(html, /PRs — Bounded Systems/);
   assert.match(html, /bump the bun-major group/);
   assert.match(html, /#1001/);
-  assert.match(html, /claimed/);
+  assert.match(html, /no live claim/);
   assert.match(html, /3 hours ago/);
   assert.match(html, /a &lt;fix&gt;/);
   assert.match(html, /href="https:\/\/desk\.bounded\.tools"/);
 });
 
+// THE STATES MUST NOT BE ADDED TOGETHER (#15). `no live claim` is a PR to fix;
+// `not gated` is a repo that has not adopted the check. One tile holding their
+// sum would make a rollout gap read as a compliance problem, and would go DOWN
+// as repos adopt the gate — the wrong direction for both numbers.
+test("no-live-claim and not-gated are separate tiles, never summed", () => {
+  const html = renderPrs(
+    prs({ compliance: compliance({ non_compliant: 3, not_measured: 5 }) }), AT, 60);
+  assert.match(html, /3<\/div><div class="tile__l">no live claim/);
+  assert.match(html, /5<\/div><div class="tile__l">not gated/);
+  assert.doesNotMatch(html, /8<\/div>/, "the two states were summed into one tile");
+});
+
+// A compliant row carries NO suffix — the normal case must not shout, or the
+// two states worth acting on stop standing out.
+test("a compliant row is not annotated", () => {
+  const html = renderPrs(
+    prs({ items: [{ repo: "bounded-systems/prx", number: 1, title: "ok", url: "https://e/1", labels: [], claim: "compliant" }] }),
+    AT, 60);
+  assert.doesNotMatch(html, /· /);
+});
+
+// The Worker and the feed deploy independently, so an unrecognised or absent
+// state must render, not throw or print `undefined`.
+test("an unrecognised claim state renders as unknown", () => {
+  const html = renderPrs(
+    prs({ items: [{ repo: "bounded-systems/prx", number: 1, title: "x", url: "https://e/1", labels: [], claim: "from-a-newer-producer" }] }),
+    AT, 60);
+  assert.match(html, /· unknown/);
+  assert.doesNotMatch(html, /undefined/);
+});
+
+test("the page explains that `not gated` is not a failure", () => {
+  const html = renderPrs(prs(), AT, 60);
+  assert.match(html, /not a failure/);
+});
+
 test("an empty PR list says the backlog is drained, not nothing", () => {
-  const html = renderPrs(prs({ count: 0, claimed: 0, items: [] }), AT, 60);
+  const html = renderPrs(prs({ count: 0, compliance: compliance(), items: [] }), AT, 60);
   assert.match(html, /No open pull requests/);
 });
 

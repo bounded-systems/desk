@@ -191,6 +191,23 @@ export function selectClaims(feed) {
  * the desk feed above all, whose rows this page must never present as PRs —
  * fails closed rather than rendering the wrong feed.
  */
+/**
+ * The claim-compliance states a PR row can be in, from the `pr-claim` gate
+ * (`.github-private`#723) as published by `front-desk-feed`#7.
+ *
+ * `not_measured` IS NOT A FAILURE. It means no `pr-claim` check ran on that
+ * head — the repo has not adopted the gate — which is `.github-private`#725's
+ * rollout metric. Folding it in with `non_compliant` would turn a coverage gap
+ * into an accusation against an author who did nothing wrong, and would make
+ * the rollout look finished as repos adopt the check. `unknown` stays separate
+ * for the mirror reason: "we could not tell" is not "there was nothing there".
+ *
+ * Listed rather than derived from the feed's own keys so an unrecognised state
+ * arriving from a newer producer degrades to `unknown` instead of silently
+ * adding a column nobody designed.
+ */
+export const CLAIM_STATES = ["compliant", "non_compliant", "not_measured", "pending", "unknown"];
+
 export function selectPrs(feed) {
   requireBoardFeed(
     feed,
@@ -204,17 +221,27 @@ export function selectPrs(feed) {
       ? (b.number ?? 0) - (a.number ?? 0)
       : String(a.repo).localeCompare(String(b.repo)),
   );
+
+  // A feed that predates `claim_check` reads `unknown` rather than throwing.
+  // The Worker and the feed deploy independently, so the feed WILL be older
+  // than this code for some window, and a page that 5xxs through it would be a
+  // worse answer than one that says it does not know.
+  const stateOf = (i) => CLAIM_STATES.find((s) => s === i?.claim_check?.state) ?? "unknown";
+
+  const compliance = Object.fromEntries(CLAIM_STATES.map((s) => [s, 0]));
+  for (const i of items) compliance[stateOf(i)]++;
+
   return {
     generated_at: feed.generated_at,
     count: sorted.length,
-    claimed: items.filter((i) => i.claimed).length,
+    compliance,
     items: sorted.map((i) => ({
       repo: i.repo,
       number: i.number,
       title: i.title,
       url: i.url,
       labels: i.labels || [],
-      claimed: !!i.claimed,
+      claim: stateOf(i),
     })),
   };
 }
