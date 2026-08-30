@@ -34,6 +34,9 @@ function pkgRoot() {
 // launcher expects to mask.
 export const ASSETS = [
   ["avatar/avatar-forest.svg", "brand/avatar-forest.svg"],
+  // 200 is the closest the package ships to iOS's canonical 180 for
+  // apple-touch-icon. iOS downscales; what it will NOT do is take an SVG.
+  ["avatar/avatar-forest-200.png", "brand/avatar-forest-200.png"],
   ["avatar/avatar-forest-460.png", "brand/avatar-forest-460.png"],
   ["avatar/avatar-forest-1024.png", "brand/avatar-forest-1024.png"],
 ];
@@ -80,6 +83,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 // apple-touch-icon and will not take an SVG for the Home Screen.
 
 export const AVATAR_SVG = ${JSON.stringify(await readFile("brand/avatar-forest.svg", "utf8"))};
+export const AVATAR_200 = "${await b64("brand/avatar-forest-200.png")}";
 export const AVATAR_460 = "${await b64("brand/avatar-forest-460.png")}";
 export const AVATAR_1024 = "${await b64("brand/avatar-forest-1024.png")}";
 
@@ -91,7 +95,7 @@ export function iconBytes(b64) {
   return out;
 }
 
-export const ICON_PNGS = { 460: AVATAR_460, 1024: AVATAR_1024 };
+export const ICON_PNGS = { 200: AVATAR_200, 460: AVATAR_460, 1024: AVATAR_1024 };
 `;
   await writeFile("src/icons.js", src);
   console.log("  src/icons.js");

@@ -591,7 +591,7 @@ test("the Home Screen icon is served, not a letter", async () => {
   assert.match(body, /L42\.5 81/);
   assert.match(body, /width="12" height="12"/);
 
-  for (const [path, size] of [["/icon-460.png", 460], ["/icon-1024.png", 1024]]) {
+  for (const [path, size] of [["/icon-200.png", 200], ["/icon-460.png", 460], ["/icon-1024.png", 1024]]) {
     const res = await get("desk.bounded.tools", path);
     assert.equal(res.status, 200, path);
     assert.equal(res.headers.get("content-type"), "image/png", path);
@@ -603,19 +603,48 @@ test("the Home Screen icon is served, not a letter", async () => {
   }
 });
 
-test("the manifest offers the SVG first, and everything maskable", async () => {
+test("THE MANIFEST LEADS WITH A PNG — iOS cannot render an SVG icon", async () => {
+  // Leading with the vector is how a phone ends up with no icon at all and falls
+  // back to the first letter of the name. Everything that understands SVG picks
+  // the best match rather than the first entry, so this costs those clients
+  // nothing and gives the one with no fallback something it can use.
   const m = await (await get("desk.bounded.tools", "/manifest.webmanifest")).json();
-  assert.equal(m.icons.length, 2);
-  // Vector first: it scales to whatever a launcher asks for, so there is no size
-  // to keep in sync with a file.
-  assert.equal(m.icons[0].type, "image/svg+xml");
-  assert.equal(m.icons[0].sizes, "any");
-  assert.equal(m.icons[1].type, "image/png");
+  assert.equal(m.icons[0].type, "image/png", "the first entry must be raster");
+  assert.ok(m.icons.some((i) => i.type === "image/svg+xml"), "the vector is still offered");
   for (const i of m.icons) {
     // Declaring only "any" makes Android draw a white plate behind a full-bleed
     // icon; the avatar bleeds to the edge deliberately.
     assert.match(i.purpose, /maskable/);
   }
+});
+
+test("the conventional apple-touch-icon paths serve a PNG, not the page", async () => {
+  // iOS reaches for these by name when the <link> does not resolve. They fell
+  // through to the catch-all and answered 200 with text/html — a web page served
+  // as a PNG, the same wrong-content-type 200 #766 named, in the two paths a
+  // phone asks for rather than reads from markup.
+  for (const path of ["/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"]) {
+    const res = await get("desk.bounded.tools", path);
+    assert.equal(res.status, 200, path);
+    assert.equal(res.headers.get("content-type"), "image/png", path);
+    const b = new Uint8Array(await res.arrayBuffer());
+    assert.ok(b[0] === 0x89 && b[1] === 0x50, `${path} is a PNG`);
+  }
+});
+
+test("an open page is told to refresh when a push arrives", async () => {
+  // Without this the notification says the board changed and the board in front
+  // of the reader still does not — the page is rendered once and nothing polls.
+  const sw = await (await get("desk.bounded.tools", "/sw.js")).text();
+  assert.match(sw, /clients\.matchAll/);
+  assert.match(sw, /front-desk:refresh/);
+
+  const js = await (await get("desk.bounded.tools", "/notify.js", KEYED_ENV)).text();
+  assert.match(js, /front-desk:refresh/, "the page listens for it");
+  // And a push may never arrive — the device was off, or nobody is subscribed —
+  // so returning to a stale page reloads it too.
+  assert.match(js, /visibilitychange/);
+  assert.match(js, /location\.reload\(\)/);
 });
 
 test("THE PAGE LINKS THE MANIFEST — it never did, which is why iOS showed a letter", async () => {
@@ -639,7 +668,8 @@ test("the static hosts 404 the app-shell paths instead of serving a page as one"
   // to the board, so /manifest.webmanifest answered 200 with text/html. A check
   // that only reads the status would call the asset present.
   for (const host of STATIC_HOSTS) {
-    for (const path of ["/manifest.webmanifest", "/sw.js", "/notify.js", "/icon.svg", "/icon-1024.png"]) {
+    for (const path of ["/manifest.webmanifest", "/sw.js", "/notify.js", "/icon.svg",
+                        "/icon-1024.png", "/apple-touch-icon.png"]) {
       const res = await get(host, path);
       assert.equal(res.status, 404, `${host}${path}`);
     }
