@@ -46,6 +46,9 @@ import {
   renderUnavailable,
 } from "./render.js";
 import { validateSubscription, putSubscription } from "./subscriptions.js";
+import { notifyAll } from "./notify.js";
+import { importVapidKey } from "./push.js";
+import { verifyNotifyCaller } from "./oidc.js";
 
 // ── The installable app (#766) ───────────────────────────────────────────────
 //
@@ -396,6 +399,63 @@ export async function handleSubscribe(request, env) {
   });
 }
 
+
+/**
+ * Fan out to every subscribed device.
+ *
+ * AUTHORIZED BY A GITHUB ACTIONS OIDC TOKEN, not a shared secret — see
+ * src/oidc.js for why. The token is minted per run, expires in minutes, and is
+ * pinned to one workflow at one ref, so there is no standing credential here to
+ * leak or rotate.
+ *
+ * Returns the census rather than 204, because "sent 0 of 0" and "sent 0 of 12"
+ * are different facts and the caller's job summary is where anyone would notice
+ * the difference.
+ */
+export async function handleNotify(request, env) {
+  const no = (status, error) =>
+    new Response(JSON.stringify({ error }) + "\n", {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    });
+
+  if (!env.SUBSCRIPTIONS) return no(503, "no subscription store is configured on this deployment");
+  if (!env.VAPID_PUBLIC_KEY || !env.VAPID_PRIVATE_KEY) {
+    return no(503, "no signing keypair is configured on this deployment");
+  }
+  if (!env.VAPID_SUBJECT) return no(503, "no VAPID subject contact is configured on this deployment");
+
+  const auth = request.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return no(401, "an Actions OIDC bearer token is required");
+  try {
+    await verifyNotifyCaller(token);
+  } catch (e) {
+    // 403 rather than 401: the token was read and rejected. A caller that
+    // cannot tell "no token" from "wrong workflow" debugs the wrong half.
+    return no(403, `caller not authorized: ${e.message}`);
+  }
+
+  let key;
+  try {
+    key = await importVapidKey(env.VAPID_PUBLIC_KEY, env.VAPID_PRIVATE_KEY);
+  } catch (e) {
+    // A mismatched pair fails here rather than as a 401 from every push service
+    // an hour later — which would look exactly like a dead subscription list.
+    return no(503, `the configured VAPID keypair is unusable: ${e.message}`);
+  }
+
+  const census = await notifyAll(env.SUBSCRIPTIONS, {
+    publicKey: env.VAPID_PUBLIC_KEY,
+    key,
+    subject: env.VAPID_SUBJECT,
+  });
+  return new Response(JSON.stringify(census, null, 2) + "\n", {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -415,6 +475,14 @@ export default {
         return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
       }
       return await handleSubscribe(request, env);
+    }
+
+    // The fan-out trigger (#37). Same surface rule, same reason.
+    if (url.pathname === "/notify" && request.method === "POST") {
+      if (surfaceFor(url.hostname, env) !== "overview") {
+        return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
+      }
+      return await handleNotify(request, env);
     }
 
     if (request.method !== "GET" && request.method !== "HEAD") {

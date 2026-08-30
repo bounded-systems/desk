@@ -4,6 +4,9 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/worker.js";
+import { issuer } from "./oidc-fixture.mjs";
+import { b64url } from "../src/push.js";
+import { listSubscriptions } from "../src/subscriptions.js";
 
 const BOARD = {
   feed: "front-desk-public",
@@ -427,4 +430,137 @@ test("the method gate still holds for everything that is not /subscribe", async 
   const res = await post("desk.bounded.tools", "/", SUBSCRIPTION, KEYED_ENV);
   assert.equal(res.status, 405);
   assert.equal(res.headers.get("allow"), "GET, HEAD");
+});
+
+// ── /notify, the fan-out trigger (#37) ───────────────────────────────────────
+//
+// ONE issuer for this whole file: src/oidc.js caches the JWKS for an hour, so a
+// second issuer here would be verified against the first one's keys and every
+// test after it would fail for the wrong reason.
+const ISS = await issuer();
+
+/** A real P-256 pair — the endpoint imports it, so a fake one fails at import. */
+async function vapidEnv(extra = {}) {
+  const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const pub = b64url(await crypto.subtle.exportKey("raw", kp.publicKey));
+  const jwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+  return {
+    ...ENV,
+    VAPID_PUBLIC_KEY: pub,
+    VAPID_PRIVATE_KEY: jwk.d,
+    VAPID_SUBJECT: "mailto:desk@bounded.tools",
+    SUBSCRIPTIONS: kvStub(),
+    ...extra,
+  };
+}
+
+/** Serve GitHub's JWKS from the fixture, and every push endpoint with `status`. */
+function stubOidcAndPush({ status = 201 } = {}) {
+  globalThis.fetch = async (url) => {
+    const href = typeof url === "string" ? url : url.url;
+    if (href.includes("/.well-known/jwks")) {
+      return new Response(JSON.stringify({ keys: ISS.jwks }), { status: 200 });
+    }
+    return new Response(null, { status });
+  };
+}
+
+const notify = (token, env, host = "desk.bounded.tools") =>
+  worker.fetch(new Request(`https://${host}/notify`, {
+    method: "POST",
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  }), env);
+
+async function seed(env, ...names) {
+  for (const n of names) {
+    await worker.fetch(new Request("https://desk.bounded.tools/subscribe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        endpoint: `https://fcm.googleapis.com/fcm/send/${n}`,
+        keys: { p256dh: "p", auth: "a" },
+      }),
+    }), env);
+  }
+}
+
+test("the pinned lane triggers a fan-out and gets the census back", async () => {
+  const env = await vapidEnv();
+  await seed(env, "a", "b");
+  stubOidcAndPush();
+  const res = await notify(await ISS.mint(), env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { total: 2, sent: 2, pruned: 0, retry: 0, failed: 0 });
+});
+
+test("a dead device is pruned by a real fan-out, not just in the unit test", async () => {
+  const env = await vapidEnv();
+  await seed(env, "dead");
+  stubOidcAndPush({ status: 410 });
+  const res = await notify(await ISS.mint(), env);
+  assert.equal((await res.json()).pruned, 1);
+  assert.equal((await listSubscriptions(env.SUBSCRIPTIONS)).length, 0);
+});
+
+test("no token is a 401, and a token from the wrong workflow is a 403", async () => {
+  const env = await vapidEnv();
+  stubOidcAndPush();
+  assert.equal((await notify(null, env)).status, 401);
+
+  const wrong = await ISS.mint({
+    workflowRef: "bounded-systems/.github-private/.github/workflows/org-sync.yml@refs/heads/main",
+  });
+  const res = await notify(wrong, env);
+  assert.equal(res.status, 403);
+  assert.match((await res.json()).error, /workflow not allowed/);
+});
+
+test("nothing is sent when the caller is refused", async () => {
+  const env = await vapidEnv();
+  await seed(env, "a");
+  let pushes = 0;
+  globalThis.fetch = async (url) => {
+    const href = typeof url === "string" ? url : url.url;
+    if (href.includes("/.well-known/jwks")) return new Response(JSON.stringify({ keys: ISS.jwks }), { status: 200 });
+    pushes++;
+    return new Response(null, { status: 201 });
+  };
+  await notify(await ISS.mint({ aud: "cloudflare-workers-deploy-broker" }), env);
+  assert.equal(pushes, 0, "authorization must be settled before anything is pushed");
+});
+
+test("a mismatched keypair is a 503 here, not a 401 from every push service later", async () => {
+  const good = await vapidEnv();
+  const other = await vapidEnv();
+  const env = { ...good, VAPID_PRIVATE_KEY: other.VAPID_PRIVATE_KEY };
+  stubOidcAndPush();
+  const res = await notify(await ISS.mint(), env);
+  assert.equal(res.status, 503);
+  assert.match((await res.json()).error, /keypair is unusable/);
+});
+
+test("missing configuration is a 503 naming which piece", async () => {
+  stubOidcAndPush();
+  const full = await vapidEnv();
+  const token = await ISS.mint();
+  for (const [drop, pattern] of [
+    ["SUBSCRIPTIONS", /subscription store/],
+    ["VAPID_PRIVATE_KEY", /signing keypair/],
+    ["VAPID_SUBJECT", /subject contact/],
+  ]) {
+    const env = { ...full };
+    delete env[drop];
+    const res = await notify(token, env);
+    assert.equal(res.status, 503, drop);
+    assert.match((await res.json()).error, pattern, drop);
+  }
+});
+
+test("/notify exists on desk and nowhere else", async () => {
+  const env = await vapidEnv();
+  stubOidcAndPush();
+  const token = await ISS.mint();
+  for (const host of STATIC_HOSTS) {
+    assert.equal((await notify(token, env, host)).status, 404, host);
+  }
 });
