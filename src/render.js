@@ -289,6 +289,23 @@ export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
   // reaching for, and they are kept APART on purpose: `no live claim` is a PR to
   // fix, `not gated` is a repo that has not adopted the check yet, and adding
   // them together would make a rollout gap look like a compliance problem.
+  //
+  // `unknown` IS SHOWN, AND THAT IS THE SAME DEFECT ONE LEVEL DOWN (#809). The
+  // two tiles above count only states the projection MEASURED, so a row it could
+  // not measure fell out of the summary entirely — and on 2026-08-30 the page
+  // read `6 open · 0 no live claim · 0 not gated` while all six were blocked on
+  // exactly `no live claim`. The enrichment reads check-runs in each PR's OWN
+  // repo, which the projection's repo-scoped token cannot reach, so every
+  // cross-repo row degrades to `unknown` and both problem tiles are structurally
+  // zero.
+  //
+  // Per-row honesty was intact — each said `unknown` — but the SUMMARY is what a
+  // reader looks at first, and it said the queue was clean. Exactly the shape the
+  // paragraph above describes, recurring because the fix counted the states it
+  // knew about rather than every row.
+  //
+  // Shown even at zero, deliberately: `0 unknown` is positive evidence that the
+  // rows WERE measured, and silence is indistinguishable from "not checked".
   return page(
     "PRs — Bounded Systems",
     description,
@@ -299,12 +316,16 @@ export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
         ${tile(d.count, "open")}
         ${tile(c.non_compliant, "no live claim")}
         ${tile(c.not_measured, "not gated")}
+        ${tile(c.unknown, "unknown")}
       </div>
       ${list}
       <footer><p class="muted">Every PR should name an issue that carries a live claim, and
         <code>pr-claim</code> checks it on each pull request. <strong>No live claim</strong> means the
         gate ran and the PR named no open, claimed issue. <strong>Not gated</strong> is not a failure —
-        the check has not been adopted in that repo yet. A green check says an open, claimed issue was
+        the check has not been adopted in that repo yet. <strong>Unknown</strong> means this projection
+        could not read the PR's checks at all — usually a PR in another repository, which the
+        projection's own token cannot reach — so those rows are counted here rather than being
+        left out of the summary. A green check says an open, claimed issue was
         named; it does not establish that the PR is the work of that claim.</p>
       ${elsewhere("prs")}</footer>`,
   );
