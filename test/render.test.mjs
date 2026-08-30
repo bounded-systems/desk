@@ -26,11 +26,60 @@ test("says it is stale past the threshold, and how old", () => {
   const html = renderIssues(board(), Date.parse("2026-08-27T12:00:00Z"), 60);
   assert.match(html, /snapshot is old/);
   assert.match(html, /2 days ago/);
-  assert.match(html, /stamp--stale/);
+  // Was `/stamp--stale/`, which matched the STYLESHEET and passed regardless.
+  assert.equal(banner(html), "stamp--stale");
 });
 
-test("names the cache window, so the age cannot overclaim its precision", () => {
-  assert.match(renderIssues(board(), AT, 60), /up to 60s/);
+// ── Freshness, in three bands (#809) ────────────────────────────────────────
+//
+// AT is 3h after the stamp, which USED to render the plain stamp because the
+// only threshold was 24h. It now renders `behind`, and that change is the point:
+// a 6h25m-old board rendered as completely normal on 2026-08-30, because
+// "current" and "the lane stopped" were the only two states and the one a reader
+// actually meets sits between them.
+const FRESH = Date.parse("2026-08-25T12:30:00Z"); // 30m after the stamp
+
+// MATCH THE RENDERED DIV, NOT THE CLASS NAME. Both modifier classes are defined
+// in the stylesheet on every page, so a bare /stamp--stale/ matches the CSS and
+// passes whether or not the banner rendered. The pre-existing stale test did
+// exactly that; it is corrected below. Same failure as asserting /3/ for a tile
+// count — the string is present for an unrelated reason.
+const banner = (html) => {
+  const m = /<div class="stamp([^"]*)"/.exec(html);
+  return m ? m[1].trim() : null;   // "" fresh, "stamp--behind", "stamp--stale"
+};
+
+test("fresh: names the cache window without overclaiming what it bounds", () => {
+  const html = renderIssues(board(), FRESH, 60);
+  assert.match(html, /up to 60s/);
+  assert.equal(banner(html), "");
+  // The removed claim: the edge TTL never bounded how far the SNAPSHOT trails
+  // the newest one — the publishing lane does. Saying otherwise is what made a
+  // hours-stale board look like a cache artefact.
+  assert.doesNotMatch(html, /accurate to within that window/);
+});
+
+test("behind: hours old is reported, and reported as normal rather than broken", () => {
+  const html = renderIssues(board(), AT, 60);
+  assert.equal(banner(html), "stamp--behind");
+  assert.match(html, /3 hours ago/);
+  // Informational wording. At the measured cadence this band is on often, and an
+  // always-red banner is one nobody reads (#139) — so it must not say "broken".
+  assert.match(html, /best-effort/);
+  assert.match(html, /may have been picked up since/);
+});
+
+test("stopped: past a day is still the alarm, and says the lane stopped", () => {
+  const html = renderIssues(board(), Date.parse("2026-08-27T12:00:00Z"), 60);
+  assert.equal(banner(html), "stamp--stale");
+  assert.match(html, /This snapshot is old/);
+});
+
+test("the bands do not overlap — exactly one applies at any age", () => {
+  // A page carrying two freshness verdicts at once is worse than either.
+  for (const [at, want] of [[FRESH, ""], [AT, "stamp--behind"], [Date.parse("2026-08-27T12:00:00Z"), "stamp--stale"]]) {
+    assert.equal(banner(renderIssues(board(), at, 60)), want, `wrong band at ${new Date(at).toISOString()}`);
+  }
 });
 
 test("reports everything held back", () => {

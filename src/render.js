@@ -19,6 +19,33 @@
 // made when PRs left the desk: the count does not vanish, it moves to the host
 // that owns it, and a footer line says where.
 
+// TWO BANDS, BECAUSE ONE THRESHOLD CANNOT SAY BOTH THINGS.
+//
+// The single 24h threshold was set against the lane's DECLARED cadence — "the
+// lane publishes hourly, so the number worth reacting to is the lane stopping".
+// Measured 2026-08-30, the declared cadence is not the real one. GitHub delivers
+// scheduled workflows best-effort and drops slots under load, and every hourly
+// cron in the org is shredded:
+//
+//   front-desk-projection   36 of ~106 slots over 106h   (~34%)
+//   front-desk-sync         one per 3.36h                (~30%)
+//   pr-projection           one per 6.05h                (~17%)
+//   front-desk-feed publish gaps of 2h41m, 5h09m, 6h25m  and widening
+//   repo-health-projection  DAILY — one per 24.48h       (~98%)
+//
+// So a 6h-old board is NORMAL, not broken — and on 2026-08-30 a 6h25m-old board
+// rendered with no indication at all, because it sat far below 24h. That is the
+// gap: "current" and "the lane stopped" are not the only two states, and the one
+// in between is the one a reader actually meets.
+//
+// Tightening the single threshold would not fix it. At the measured cadence a 2h
+// alarm would be on almost always, and an always-red banner is one nobody reads
+// (#139) — the same reason claim-sweep's staleness rule and dispatch-liveness
+// both refuse to alarm on their normal state.
+//
+// BEHIND is therefore informational and STOPPED is the alarm. The first says
+// "this may have moved since"; the second says "nobody is publishing".
+const BEHIND_AFTER_HOURS = 2;
 const STALE_AFTER_HOURS = 24;
 
 const esc = (s) =>
@@ -34,7 +61,9 @@ function humanAge(ms) {
   return `${Math.floor(h / 24)} days`;
 }
 
-const isStale = (generatedAt, now) => (now - Date.parse(generatedAt)) / 36e5 > STALE_AFTER_HOURS;
+const hoursSince = (generatedAt, now) => (now - Date.parse(generatedAt)) / 36e5;
+const isStale = (generatedAt, now) => hoursSince(generatedAt, now) > STALE_AFTER_HOURS;
+const isBehind = (generatedAt, now) => hoursSince(generatedAt, now) > BEHIND_AFTER_HOURS;
 
 function stamp(generatedAt, now, edgeTtlSeconds, what = "Board", extra = "") {
   const ageMs = now - Date.parse(generatedAt);
@@ -46,10 +75,29 @@ function stamp(generatedAt, now, edgeTtlSeconds, what = "Board", extra = "") {
         hourly, so this means it stopped. Treat what follows as history, not as the board.${extra}
       </div>`;
   }
+  if (isBehind(generatedAt, now)) {
+    return `<div class="stamp stamp--behind">
+        ${esc(what)} projected at <span class="mono">${when}</span>, <strong>${esc(humanAge(ageMs))} ago</strong>.
+        The publishing lane is scheduled hourly, but GitHub runs scheduled workflows best-effort and
+        drops slots under load — measured delivery is well under half, so gaps of several hours are
+        normal rather than a fault. Work listed here may have been picked up since.${extra}
+      </div>`;
+  }
+  // THE OLD SENTENCE HERE WAS FALSE AND IT MATTERED (#809). It read "cached at
+  // the edge for up to Ns, so this age is accurate to within that window" — but
+  // the age is the SNAPSHOT's age, and how far the snapshot trails the newest
+  // one is set by the publishing lane, not by this cache. The feed also carries
+  // its own 300s cache upstream. I used that sentence to decide a change should
+  // be visible, and it was wrong by hours.
+  //
+  // What the edge TTL actually bounds is how stale the *rendered page* is
+  // relative to the feed, which is the smaller and less interesting number. Say
+  // that, rather than promising something this page cannot know.
   return `<div class="stamp">
         ${esc(what)} projected at <span class="mono">${when}</span>, ${esc(humanAge(ageMs))} ago.
-        Read live on each request and cached at the edge for up to ${edgeTtlSeconds}s, so this age is
-        accurate to within that window.${extra}
+        Read live per request and cached at the edge for up to ${edgeTtlSeconds}s; the age shown is
+        the snapshot's own, and how far it trails the newest one depends on when the publishing lane
+        last ran.${extra}
       </div>`;
 }
 
@@ -96,6 +144,9 @@ const STYLE = `
     .stamp { border:1px solid var(--line); background:var(--card); border-radius:.6rem;
       padding:.8rem 1rem; margin-bottom:1.5rem; font-size:.92rem; color:var(--muted); }
     .stamp--stale { border-color:var(--warn); background:var(--warnbg); color:var(--warn); }
+    /* Informational, not an alarm: a distinct left edge rather than the warn
+       ground, so "behind" never reads as "broken" at a glance. */
+    .stamp--behind { border-left:3px solid var(--accent); }
     .desk__tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr));
       gap:.75rem; margin-bottom:1.75rem; }
     .tile { border:1px solid var(--line); background:var(--card); border-radius:.6rem; padding:.8rem 1rem; }
