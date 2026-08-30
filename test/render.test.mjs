@@ -467,3 +467,46 @@ test("`0 unknown` is shown too — silence and 'not checked' look identical", ()
   // measured, and an absent tile is indistinguishable from "not checked".
   assert.equal(tileFor(out, "unknown"), 0);
 });
+
+// ── Presentation invariants (the design pass) ───────────────────────────────
+//
+// CSS is not usually worth asserting. These four are, because each is a
+// correctness property rather than taste, and three of them exist only because
+// of what changed today.
+
+test("the stylesheet is not broken by its own comments", () => {
+  // A backtick inside a CSS comment TERMINATES the template literal the
+  // stylesheet lives in, and the file then fails to parse — which is how this
+  // pass first broke every test in the suite. Prose that names a CSS property
+  // is exactly where that is tempting.
+  const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.ok(css.length > 200, "stylesheet rendered");
+  assert.ok(!css.includes("`"), "a backtick in the stylesheet would have ended the template");
+});
+
+test("safe-area insets are respected — the app is standalone now", () => {
+  // New requirement as of today: installed to the Home Screen, this page is no
+  // longer inside browser chrome, so the notch and home indicator are its
+  // problem. Added to the existing padding, so nothing changes on the web.
+  const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
+  for (const side of ["top", "bottom", "left", "right"]) {
+    assert.ok(css.includes(`env(safe-area-inset-${side})`), `missing safe-area-inset-${side}`);
+  }
+});
+
+test("focus is visible", () => {
+  // Links here replace the UA underline with a border-bottom, which on some
+  // browsers also costs the default focus ring its contrast. The page is
+  // keyboard- and switch-operable and had no explicit focus style at all.
+  const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.match(css, /:focus-visible\s*\{[^}]*outline:/);
+});
+
+test("the behind band does not shift its text relative to the other two", () => {
+  // Drawn inside the border with an inset shadow rather than a thicker
+  // border-left: three stamps that do not share a left edge read as three
+  // components, not one control in three states.
+  const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.match(css, /\.stamp--behind\s*\{[^}]*box-shadow:\s*inset/);
+  assert.ok(!/\.stamp--behind\s*\{[^}]*border-left:\s*3px/.test(css));
+});

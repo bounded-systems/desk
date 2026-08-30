@@ -132,8 +132,27 @@ const STYLE = `
     }
     * { box-sizing: border-box; }
     body { margin:0; background:var(--bg); color:var(--fg);
-      font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
-    .wrap { max-width:52rem; margin:0 auto; padding:2.5rem 1.25rem 4rem; }
+      font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+      /* Prevents iOS enlarging body text in landscape, which reflows the tile
+         row into something the layout was not measured against. */
+      -webkit-text-size-adjust:100%; }
+    /* SAFE AREAS ARE NEW AS OF TODAY (#766). Until this page became an
+       installable standalone app it was always inside browser chrome, which
+       handles the notch and the home indicator for you. Installed, it is not:
+       content runs under both. The insets are ADDED to the existing padding
+       rather than replacing it, so nothing changes on the web. */
+    .wrap { max-width:52rem; margin:0 auto;
+      padding:2.5rem 1.25rem 4rem;
+      padding-left:calc(1.25rem + env(safe-area-inset-left));
+      padding-right:calc(1.25rem + env(safe-area-inset-right));
+      padding-top:calc(2.5rem + env(safe-area-inset-top));
+      padding-bottom:calc(4rem + env(safe-area-inset-bottom)); }
+
+    /* FOCUS WAS INVISIBLE, and this page is now keyboard- and switch-operable
+       in a way it was not: links here suppress the UA underline in favour of a
+       border-bottom, which also suppresses the default focus ring's contrast on
+       some browsers. One explicit rule for everything focusable. */
+    :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:.2rem; }
     h1 { font-size:1.6rem; margin:0 0 .35rem; letter-spacing:-.01em; }
     h2 { font-size:1.05rem; margin:0; letter-spacing:-.005em; }
     h2 a { color:inherit; text-decoration:none; border-bottom:1px solid var(--line); }
@@ -146,9 +165,19 @@ const STYLE = `
     .stamp--stale { border-color:var(--warn); background:var(--warnbg); color:var(--warn); }
     /* Informational, not an alarm: a distinct left edge rather than the warn
        ground, so "behind" never reads as "broken" at a glance. */
-    .stamp--behind { border-left:3px solid var(--accent); }
-    .desk__tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr));
-      gap:.75rem; margin-bottom:1.75rem; }
+    /* The thicker edge is drawn INSIDE the existing 1px border, not added to it:
+       a plain border-left:3px would shift the text 2px relative to the fresh and
+       stale bands, and three stamps that do not share a left edge read as three
+       different components rather than one control in three states. */
+    .stamp--behind { box-shadow:inset 3px 0 0 var(--accent); padding-left:calc(1rem + 3px); }
+    /* minmax(0,1fr) as the floor, with auto-fit doing the wrapping: the PR page
+       carries FOUR tiles since #29 added unknown, and at a 7.5rem minimum the
+       fourth wrapped alone onto its own row on a phone — one number stranded
+       under three, which reads as more important rather than merely later.
+       A 2x2 at narrow widths keeps them a set. */
+    .desk__tiles { display:grid; gap:.75rem; margin-bottom:1.75rem;
+      grid-template-columns:repeat(auto-fit,minmax(min(100%,7.5rem),1fr)); }
+    @media (max-width:26rem) { .desk__tiles { grid-template-columns:repeat(2,1fr); } }
     .tile { border:1px solid var(--line); background:var(--card); border-radius:.6rem; padding:.8rem 1rem; }
     .tile__n { font-size:1.5rem; font-weight:650; line-height:1.1; }
     .tile__l { color:var(--muted); font-size:.82rem; margin-top:.15rem; }
@@ -171,8 +200,11 @@ const STYLE = `
               border-radius:.6rem; background:var(--card); }
     .notify h2 { margin:0 0 .35rem; }
     .notify p { margin:.35rem 0; }
-    .notify button { font:inherit; padding:.5rem 1rem; border-radius:.5rem; cursor:pointer;
-                     border:1px solid var(--accent); background:var(--accent); color:var(--bg); }
+    /* min-height 44px: the platform touch-target floor, and this is the only
+       thing on the whole site anyone taps — on the device it was pinned to. */
+    .notify button { font:inherit; padding:.6rem 1.1rem; min-height:44px; border-radius:.5rem;
+                     cursor:pointer; border:1px solid var(--accent);
+                     background:var(--accent); color:var(--bg); }
     .notify button:disabled { opacity:.6; cursor:default; }`;
 
 function page(title, description, body) {
