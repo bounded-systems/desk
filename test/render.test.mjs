@@ -26,11 +26,60 @@ test("says it is stale past the threshold, and how old", () => {
   const html = renderIssues(board(), Date.parse("2026-08-27T12:00:00Z"), 60);
   assert.match(html, /snapshot is old/);
   assert.match(html, /2 days ago/);
-  assert.match(html, /stamp--stale/);
+  // Was `/stamp--stale/`, which matched the STYLESHEET and passed regardless.
+  assert.equal(banner(html), "stamp--stale");
 });
 
-test("names the cache window, so the age cannot overclaim its precision", () => {
-  assert.match(renderIssues(board(), AT, 60), /up to 60s/);
+// ── Freshness, in three bands (#809) ────────────────────────────────────────
+//
+// AT is 3h after the stamp, which USED to render the plain stamp because the
+// only threshold was 24h. It now renders `behind`, and that change is the point:
+// a 6h25m-old board rendered as completely normal on 2026-08-30, because
+// "current" and "the lane stopped" were the only two states and the one a reader
+// actually meets sits between them.
+const FRESH = Date.parse("2026-08-25T12:30:00Z"); // 30m after the stamp
+
+// MATCH THE RENDERED DIV, NOT THE CLASS NAME. Both modifier classes are defined
+// in the stylesheet on every page, so a bare /stamp--stale/ matches the CSS and
+// passes whether or not the banner rendered. The pre-existing stale test did
+// exactly that; it is corrected below. Same failure as asserting /3/ for a tile
+// count — the string is present for an unrelated reason.
+const banner = (html) => {
+  const m = /<div class="stamp([^"]*)"/.exec(html);
+  return m ? m[1].trim() : null;   // "" fresh, "stamp--behind", "stamp--stale"
+};
+
+test("fresh: names the cache window without overclaiming what it bounds", () => {
+  const html = renderIssues(board(), FRESH, 60);
+  assert.match(html, /up to 60s/);
+  assert.equal(banner(html), "");
+  // The removed claim: the edge TTL never bounded how far the SNAPSHOT trails
+  // the newest one — the publishing lane does. Saying otherwise is what made a
+  // hours-stale board look like a cache artefact.
+  assert.doesNotMatch(html, /accurate to within that window/);
+});
+
+test("behind: hours old is reported, and reported as normal rather than broken", () => {
+  const html = renderIssues(board(), AT, 60);
+  assert.equal(banner(html), "stamp--behind");
+  assert.match(html, /3 hours ago/);
+  // Informational wording. At the measured cadence this band is on often, and an
+  // always-red banner is one nobody reads (#139) — so it must not say "broken".
+  assert.match(html, /best-effort/);
+  assert.match(html, /may have been picked up since/);
+});
+
+test("stopped: past a day is still the alarm, and says the lane stopped", () => {
+  const html = renderIssues(board(), Date.parse("2026-08-27T12:00:00Z"), 60);
+  assert.equal(banner(html), "stamp--stale");
+  assert.match(html, /This snapshot is old/);
+});
+
+test("the bands do not overlap — exactly one applies at any age", () => {
+  // A page carrying two freshness verdicts at once is worse than either.
+  for (const [at, want] of [[FRESH, ""], [AT, "stamp--behind"], [Date.parse("2026-08-27T12:00:00Z"), "stamp--stale"]]) {
+    assert.equal(banner(renderIssues(board(), at, 60)), want, `wrong band at ${new Date(at).toISOString()}`);
+  }
 });
 
 test("reports everything held back", () => {
@@ -417,4 +466,47 @@ test("`0 unknown` is shown too — silence and 'not checked' look identical", ()
   // Rendered AT ZERO on purpose: `0 unknown` is positive evidence the rows were
   // measured, and an absent tile is indistinguishable from "not checked".
   assert.equal(tileFor(out, "unknown"), 0);
+});
+
+// ── Presentation invariants (the design pass) ───────────────────────────────
+//
+// CSS is not usually worth asserting. These four are, because each is a
+// correctness property rather than taste, and three of them exist only because
+// of what changed today.
+
+test("the stylesheet is not broken by its own comments", () => {
+  // A backtick inside a CSS comment TERMINATES the template literal the
+  // stylesheet lives in, and the file then fails to parse — which is how this
+  // pass first broke every test in the suite. Prose that names a CSS property
+  // is exactly where that is tempting.
+  const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.ok(css.length > 200, "stylesheet rendered");
+  assert.ok(!css.includes("`"), "a backtick in the stylesheet would have ended the template");
+});
+
+test("safe-area insets are respected — the app is standalone now", () => {
+  // New requirement as of today: installed to the Home Screen, this page is no
+  // longer inside browser chrome, so the notch and home indicator are its
+  // problem. Added to the existing padding, so nothing changes on the web.
+  const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
+  for (const side of ["top", "bottom", "left", "right"]) {
+    assert.ok(css.includes(`env(safe-area-inset-${side})`), `missing safe-area-inset-${side}`);
+  }
+});
+
+test("focus is visible", () => {
+  // Links here replace the UA underline with a border-bottom, which on some
+  // browsers also costs the default focus ring its contrast. The page is
+  // keyboard- and switch-operable and had no explicit focus style at all.
+  const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.match(css, /:focus-visible\s*\{[^}]*outline:/);
+});
+
+test("the behind band does not shift its text relative to the other two", () => {
+  // Drawn inside the border with an inset shadow rather than a thicker
+  // border-left: three stamps that do not share a left edge read as three
+  // components, not one control in three states.
+  const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.match(css, /\.stamp--behind\s*\{[^}]*box-shadow:\s*inset/);
+  assert.ok(!/\.stamp--behind\s*\{[^}]*border-left:\s*3px/.test(css));
 });

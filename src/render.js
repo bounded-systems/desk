@@ -19,6 +19,33 @@
 // made when PRs left the desk: the count does not vanish, it moves to the host
 // that owns it, and a footer line says where.
 
+// TWO BANDS, BECAUSE ONE THRESHOLD CANNOT SAY BOTH THINGS.
+//
+// The single 24h threshold was set against the lane's DECLARED cadence — "the
+// lane publishes hourly, so the number worth reacting to is the lane stopping".
+// Measured 2026-08-30, the declared cadence is not the real one. GitHub delivers
+// scheduled workflows best-effort and drops slots under load, and every hourly
+// cron in the org is shredded:
+//
+//   front-desk-projection   36 of ~106 slots over 106h   (~34%)
+//   front-desk-sync         one per 3.36h                (~30%)
+//   pr-projection           one per 6.05h                (~17%)
+//   front-desk-feed publish gaps of 2h41m, 5h09m, 6h25m  and widening
+//   repo-health-projection  DAILY — one per 24.48h       (~98%)
+//
+// So a 6h-old board is NORMAL, not broken — and on 2026-08-30 a 6h25m-old board
+// rendered with no indication at all, because it sat far below 24h. That is the
+// gap: "current" and "the lane stopped" are not the only two states, and the one
+// in between is the one a reader actually meets.
+//
+// Tightening the single threshold would not fix it. At the measured cadence a 2h
+// alarm would be on almost always, and an always-red banner is one nobody reads
+// (#139) — the same reason claim-sweep's staleness rule and dispatch-liveness
+// both refuse to alarm on their normal state.
+//
+// BEHIND is therefore informational and STOPPED is the alarm. The first says
+// "this may have moved since"; the second says "nobody is publishing".
+const BEHIND_AFTER_HOURS = 2;
 const STALE_AFTER_HOURS = 24;
 
 const esc = (s) =>
@@ -34,7 +61,9 @@ function humanAge(ms) {
   return `${Math.floor(h / 24)} days`;
 }
 
-const isStale = (generatedAt, now) => (now - Date.parse(generatedAt)) / 36e5 > STALE_AFTER_HOURS;
+const hoursSince = (generatedAt, now) => (now - Date.parse(generatedAt)) / 36e5;
+const isStale = (generatedAt, now) => hoursSince(generatedAt, now) > STALE_AFTER_HOURS;
+const isBehind = (generatedAt, now) => hoursSince(generatedAt, now) > BEHIND_AFTER_HOURS;
 
 function stamp(generatedAt, now, edgeTtlSeconds, what = "Board", extra = "") {
   const ageMs = now - Date.parse(generatedAt);
@@ -46,10 +75,29 @@ function stamp(generatedAt, now, edgeTtlSeconds, what = "Board", extra = "") {
         hourly, so this means it stopped. Treat what follows as history, not as the board.${extra}
       </div>`;
   }
+  if (isBehind(generatedAt, now)) {
+    return `<div class="stamp stamp--behind">
+        ${esc(what)} projected at <span class="mono">${when}</span>, <strong>${esc(humanAge(ageMs))} ago</strong>.
+        The publishing lane is scheduled hourly, but GitHub runs scheduled workflows best-effort and
+        drops slots under load — measured delivery is well under half, so gaps of several hours are
+        normal rather than a fault. Work listed here may have been picked up since.${extra}
+      </div>`;
+  }
+  // THE OLD SENTENCE HERE WAS FALSE AND IT MATTERED (#809). It read "cached at
+  // the edge for up to Ns, so this age is accurate to within that window" — but
+  // the age is the SNAPSHOT's age, and how far the snapshot trails the newest
+  // one is set by the publishing lane, not by this cache. The feed also carries
+  // its own 300s cache upstream. I used that sentence to decide a change should
+  // be visible, and it was wrong by hours.
+  //
+  // What the edge TTL actually bounds is how stale the *rendered page* is
+  // relative to the feed, which is the smaller and less interesting number. Say
+  // that, rather than promising something this page cannot know.
   return `<div class="stamp">
         ${esc(what)} projected at <span class="mono">${when}</span>, ${esc(humanAge(ageMs))} ago.
-        Read live on each request and cached at the edge for up to ${edgeTtlSeconds}s, so this age is
-        accurate to within that window.${extra}
+        Read live per request and cached at the edge for up to ${edgeTtlSeconds}s; the age shown is
+        the snapshot's own, and how far it trails the newest one depends on when the publishing lane
+        last ran.${extra}
       </div>`;
 }
 
@@ -84,8 +132,27 @@ const STYLE = `
     }
     * { box-sizing: border-box; }
     body { margin:0; background:var(--bg); color:var(--fg);
-      font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
-    .wrap { max-width:52rem; margin:0 auto; padding:2.5rem 1.25rem 4rem; }
+      font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+      /* Prevents iOS enlarging body text in landscape, which reflows the tile
+         row into something the layout was not measured against. */
+      -webkit-text-size-adjust:100%; }
+    /* SAFE AREAS ARE NEW AS OF TODAY (#766). Until this page became an
+       installable standalone app it was always inside browser chrome, which
+       handles the notch and the home indicator for you. Installed, it is not:
+       content runs under both. The insets are ADDED to the existing padding
+       rather than replacing it, so nothing changes on the web. */
+    .wrap { max-width:52rem; margin:0 auto;
+      padding:2.5rem 1.25rem 4rem;
+      padding-left:calc(1.25rem + env(safe-area-inset-left));
+      padding-right:calc(1.25rem + env(safe-area-inset-right));
+      padding-top:calc(2.5rem + env(safe-area-inset-top));
+      padding-bottom:calc(4rem + env(safe-area-inset-bottom)); }
+
+    /* FOCUS WAS INVISIBLE, and this page is now keyboard- and switch-operable
+       in a way it was not: links here suppress the UA underline in favour of a
+       border-bottom, which also suppresses the default focus ring's contrast on
+       some browsers. One explicit rule for everything focusable. */
+    :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:.2rem; }
     h1 { font-size:1.6rem; margin:0 0 .35rem; letter-spacing:-.01em; }
     h2 { font-size:1.05rem; margin:0; letter-spacing:-.005em; }
     h2 a { color:inherit; text-decoration:none; border-bottom:1px solid var(--line); }
@@ -96,8 +163,21 @@ const STYLE = `
     .stamp { border:1px solid var(--line); background:var(--card); border-radius:.6rem;
       padding:.8rem 1rem; margin-bottom:1.5rem; font-size:.92rem; color:var(--muted); }
     .stamp--stale { border-color:var(--warn); background:var(--warnbg); color:var(--warn); }
-    .desk__tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr));
-      gap:.75rem; margin-bottom:1.75rem; }
+    /* Informational, not an alarm: a distinct left edge rather than the warn
+       ground, so "behind" never reads as "broken" at a glance. */
+    /* The thicker edge is drawn INSIDE the existing 1px border, not added to it:
+       a plain border-left:3px would shift the text 2px relative to the fresh and
+       stale bands, and three stamps that do not share a left edge read as three
+       different components rather than one control in three states. */
+    .stamp--behind { box-shadow:inset 3px 0 0 var(--accent); padding-left:calc(1rem + 3px); }
+    /* minmax(0,1fr) as the floor, with auto-fit doing the wrapping: the PR page
+       carries FOUR tiles since #29 added unknown, and at a 7.5rem minimum the
+       fourth wrapped alone onto its own row on a phone — one number stranded
+       under three, which reads as more important rather than merely later.
+       A 2x2 at narrow widths keeps them a set. */
+    .desk__tiles { display:grid; gap:.75rem; margin-bottom:1.75rem;
+      grid-template-columns:repeat(auto-fit,minmax(min(100%,7.5rem),1fr)); }
+    @media (max-width:26rem) { .desk__tiles { grid-template-columns:repeat(2,1fr); } }
     .tile { border:1px solid var(--line); background:var(--card); border-radius:.6rem; padding:.8rem 1rem; }
     .tile__n { font-size:1.5rem; font-weight:650; line-height:1.1; }
     .tile__l { color:var(--muted); font-size:.82rem; margin-top:.15rem; }
@@ -115,7 +195,17 @@ const STYLE = `
       padding-bottom:.4rem; border-bottom:2px solid var(--line); }
     .sec__n { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86rem; color:var(--muted); flex:none; }
     .sec__more { margin:.6rem 0 0; }
-    footer { margin-top:2.5rem; padding-top:1.25rem; border-top:1px solid var(--line); }`;
+    footer { margin-top:2.5rem; padding-top:1.25rem; border-top:1px solid var(--line); }
+    .notify { margin-top:2.5rem; padding:1rem 1.25rem; border:1px solid var(--line);
+              border-radius:.6rem; background:var(--card); }
+    .notify h2 { margin:0 0 .35rem; }
+    .notify p { margin:.35rem 0; }
+    /* min-height 44px: the platform touch-target floor, and this is the only
+       thing on the whole site anyone taps — on the device it was pinned to. */
+    .notify button { font:inherit; padding:.6rem 1.1rem; min-height:44px; border-radius:.5rem;
+                     cursor:pointer; border:1px solid var(--accent);
+                     background:var(--accent); color:var(--bg); }
+    .notify button:disabled { opacity:.6; cursor:default; }`;
 
 function page(title, description, body) {
   return `<!doctype html>
@@ -399,6 +489,41 @@ function overviewSection(s) {
  * summarised here. The desk's own job is no longer to BE one of the lists; it is
  * to say how much of each there is and hand the reader to the right one.
  */
+/**
+ * The notification opt-in, on the overview page only (#766).
+ *
+ * WHY A BUTTON AND NOT AN AUTOMATIC PROMPT. `Notification.requestPermission()`
+ * must be called from a user gesture — Safari ignores it otherwise, and a
+ * permission dialog nobody asked for is the fastest way to get a permanent
+ * "denied" that cannot be re-prompted. So the ask is deliberate and one click
+ * away, never on load.
+ *
+ * WHY IT IS HIDDEN BY DEFAULT AND REVEALED BY SCRIPT. The control is useless
+ * without JavaScript, a service worker, and an installed app, and a dead button
+ * is worse than none — this page's whole posture is that it never shows
+ * something it cannot vouch for. So the markup ships `hidden` and the script
+ * un-hides it only once it has established that this browser can actually do
+ * the thing. On the three static hosts, which carry no `script-src`, the block
+ * is never rendered at all.
+ *
+ * WHY IT REPORTS iOS'S RULE RATHER THAN JUST FAILING. On iOS, Web Push works
+ * only from a Home-Screen app. A visitor in Safari who taps and gets nothing
+ * learns nothing; being told "add this to your Home Screen first" is the
+ * difference between a broken button and an instruction.
+ *
+ * The subscription itself is NOT here. Storing one needs a VAPID key and an
+ * identity to attach it to, which is the Face ID decision on #766. Permission
+ * plus a registered worker is the half that stands alone and is testable now.
+ */
+function notifyOptIn() {
+  return `<section class="notify" id="notify" hidden>
+        <h2>Notifications</h2>
+        <p class="muted" id="notify-state">Checking whether this browser can notify…</p>
+        <p><button type="button" id="notify-btn" hidden>Enable notifications</button></p>
+      </section>
+      <script src="/notify.js"></script>`;
+}
+
 export function renderOverview(d, now = Date.now(), edgeTtlSeconds = 60) {
   const description =
     "The whole desk at a glance: what is open, what is claimed, and what is worth picking up next — each summarised from the feed its own host serves.";
@@ -431,6 +556,7 @@ export function renderOverview(d, now = Date.now(), edgeTtlSeconds = 60) {
       ${head}
       ${incomplete}
       ${d.sections.map(overviewSection).join("\n")}
+      ${notifyOptIn()}
       <footer><p class="muted">Each host answers exactly one question, reads the feed live on every
         request, and fails closed rather than showing an empty list it cannot vouch for.</p></footer>`,
   );
