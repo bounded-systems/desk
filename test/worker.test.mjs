@@ -231,14 +231,39 @@ test("desk serves a service worker as JavaScript, uncached", async () => {
   assert.match(body, /addEventListener\("notificationclick"/);
 });
 
-test("the service worker caches nothing", async () => {
-  // Deliberate: the board's whole value is being current. A caching worker would
-  // serve a stale board from the installed app with no staleness banner —
-  // reintroducing offline exactly the defect this Worker exists to remove.
+test("the service worker caches NO BOARD — one page, and it is the offline one", async () => {
+  // This narrows a rule rather than dropping it. #766 forbade caching outright,
+  // for a reason that still holds: the board's whole value is being current, and
+  // a caching worker would serve a stale one from an installed app with no
+  // staleness banner — the defect this Worker exists to remove, reintroduced
+  // offline.
+  //
+  // What that rule could not express is the difference between caching the board
+  // and caching a page that says the board could not be read. The second is the
+  // same fail-closed move every stamp here makes; forbidding it left an offline
+  // launch showing the browser's error page instead. So the invariant is now
+  // stated as what it always meant.
   const body = await (await get("desk.bounded.tools", "/sw.js")).text();
-  for (const forbidden of ["caches.open", "cache.put", "cache.match", "addEventListener(\"fetch\""]) {
-    assert.ok(!body.includes(forbidden), `service worker must not ${forbidden}`);
-  }
+  const code = body.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+
+  assert.equal((code.match(/\.add\(|cache\.put\(/g) || []).length, 1, "exactly one cached entry");
+  // The cache name is a constant in the worker, so match the declaration rather
+  // than the call site — asserting the literal at caches.open() pins a detail
+  // that is free to change without changing what is cached.
+  assert.match(code, /const SHELL = "front-desk-offline-v1"/);
+  assert.match(code, /caches\.open\(SHELL\)/);
+  assert.match(code, /\.add\("\/offline"\)/);
+
+  // NOTHING IS WRITTEN TO THE CACHE AT RUNTIME. A blacklist of strings was the
+  // wrong shape here — it tripped on "/pending", which the push handler FETCHES
+  // and never caches, confusing a mention with a write. The invariant is that
+  // the only entry is the one added at install, so there is no runtime put at
+  // all: the board can never enter the cache because nothing ever puts it there.
+  assert.ok(!/cache\.put\(|caches\.match\([^)]*request/.test(code), "no runtime cache writes");
+
+  // And the fetch handler declines everything that is not a navigation, so the
+  // feed reads, /pending and the icons are untouched.
+  assert.match(code, /mode !== "navigate"/);
 });
 
 test("desk's CSP permits script from self and nothing else", async () => {
@@ -776,4 +801,78 @@ test("an off-origin approval link opens rather than focusing a desk tab", async 
   // tap promised — the keeper is a different origin.
   const sw = await (await get("desk.bounded.tools", "/sw.js")).text();
   assert.match(sw, /offOrigin/);
+});
+
+// ── the installed app (#51) ──────────────────────────────────────────────────
+
+test("the manifest has a stable id, so start_url can move without orphaning installs", async () => {
+  const m = await (await get("desk.bounded.tools", "/manifest.webmanifest")).json();
+  assert.equal(m.id, "/");
+  assert.equal(m.start_url, "/");
+});
+
+test("the splash colour is the brand green, not a page background", async () => {
+  // background_color cannot be media-queried — one value serves both launches.
+  // The light page colour meant a dark-mode launch flashed #fbfaf8.
+  const m = await (await get("desk.bounded.tools", "/manifest.webmanifest")).json();
+  assert.equal(m.background_color, "#0C5A42");
+  assert.equal(m.theme_color, "#0C5A42");
+});
+
+test("shortcuts stay inside scope, or a launcher silently ignores them", async () => {
+  const m = await (await get("desk.bounded.tools", "/manifest.webmanifest")).json();
+  assert.equal(m.shortcuts.length, 3);
+  for (const sc of m.shortcuts) {
+    // issues/claims/prs are separate ORIGINS; a shortcut to one would be out of
+    // scope and dropped without a word. These land on the overview's own
+    // anchors, which link on to the host.
+    assert.ok(sc.url.startsWith("/#"), `${sc.url} must be same-origin and in scope`);
+    assert.ok(sc.short_name.length <= 12, "launchers truncate hard");
+  }
+});
+
+test("the sections carry the anchors those shortcuts point at", async () => {
+  const html = await (await get("desk.bounded.tools")).text();
+  for (const key of ["issues", "claims", "prs"]) {
+    assert.match(html, new RegExp(`id="${key}"`), `#${key} must exist to jump to`);
+  }
+});
+
+test("viewport-fit=cover is set, or the safe-area padding is inert", async () => {
+  // env(safe-area-inset-*) resolves to 0 without it, so the insets #33 added
+  // computed as plus-zero and iOS letterboxed the page instead.
+  const html = await (await get("desk.bounded.tools")).text();
+  assert.match(html, /viewport-fit=cover/);
+  assert.match(html, /env\(safe-area-inset-top\)/);
+});
+
+test("theme-color is given per scheme", async () => {
+  const html = await (await get("desk.bounded.tools")).text();
+  assert.match(html, /theme-color" media="\(prefers-color-scheme: light\)"/);
+  assert.match(html, /theme-color" media="\(prefers-color-scheme: dark\)"/);
+});
+
+test("/offline says what it does not know, and shows no board", async () => {
+  const res = await get("desk.bounded.tools", "/offline");
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /You are offline/);
+  assert.match(html, /no cached copy is kept/);
+  // BODY ONLY. Checking the whole document matched `.sec__more` in the inlined
+  // stylesheet — the page's own scaffolding, not its content. Same trap as the
+  // showNotification count, which matched the comment explaining itself.
+  const body = html.slice(html.indexOf("<body>"));
+  assert.ok(!/<section class="sec"/.test(body), "no board sections");
+  assert.ok(!/sec__more/.test(body), "no row listings");
+});
+
+test("the worker caches ONE page and intercepts only navigations", async () => {
+  const sw = await (await get("desk.bounded.tools", "/sw.js")).text();
+  const code = sw.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  // Caching the board would serve a stale one from an installed app with no way
+  // to caveat it — the defect the live Worker exists to remove, offline.
+  assert.equal((code.match(/\.add\(/g) || []).length, 1, "exactly one cached entry");
+  assert.match(code, /"\/offline"/);
+  assert.match(code, /mode !== "navigate"/, "everything else goes to the network");
+  assert.ok(!/board\.json/.test(code), "the board is never cached");
 });

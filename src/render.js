@@ -231,10 +231,20 @@ function page(title, description, body, headExtra = "") {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- viewport-fit=cover is what MAKES the safe-area padding below do anything.
+       env(safe-area-inset-*) resolves to 0 without it, so the insets #33 added
+       have been inert since they were written: iOS letterboxed the page instead
+       of letting it reach the edges, and the padding they compute was always
+       plus-zero. The CSS was right and unreachable. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>${esc(title)}</title>
   <meta name="description" content="${esc(description)}">
-  <meta name="theme-color" content="#0C5A42">${headExtra}
+  <!-- Per scheme, because one value cannot be right in both: the bar above the
+       page should match the PAGE, not the brand. The manifest's splash colour
+       has no such option — one value serves both launches, which is why it is
+       the brand green rather than either page background. -->
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fbfaf8">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e1512">${headExtra}
   <style>${STYLE}</style>
 </head>
 <body>
@@ -466,7 +476,7 @@ function overviewSection(s) {
   // concludes there is no work when what actually happened is that nobody could
   // tell. "Nothing" and "not known" are different sentences here too.
   if (!s.ok) {
-    return `<section class="sec">
+    return `<section class="sec" id="${esc(s.key)}">
       ${heading}
       <div class="stamp stamp--stale">
         <strong>This section could not be read.</strong> It is not empty — the feed behind
@@ -493,7 +503,7 @@ function overviewSection(s) {
       ? `<p class="muted sec__more">Showing the first ${esc(s.items.length)} of ${esc(s.count)} — the rest are at <a href="https://${esc(s.host)}">${esc(s.host)}</a>.</p>`
       : `<p class="muted sec__more">All of them, in full, at <a href="https://${esc(s.host)}">${esc(s.host)}</a>.</p>`;
 
-  return `<section class="sec">
+  return `<section class="sec" id="${esc(s.key)}">
       ${heading}
       <p class="muted">${esc(copy.blurb)}</p>
       ${body}
@@ -598,5 +608,27 @@ export function renderUnavailable(reason) {
         Front Desk feed, so it is showing nothing rather than showing a ranking it cannot stand behind.
       </div>
       <p class="muted mono">${esc(reason)}</p>`,
+  );
+}
+
+/**
+ * What an installed app shows with no network (#51).
+ *
+ * It does NOT show a board. The service worker caches this page and nothing
+ * else, because a cached board is a stale board an installed app would present
+ * with no way to caveat it — the defect the live Worker exists to remove,
+ * reintroduced offline. So this says what it does not know, which is what every
+ * other failure on this board does.
+ */
+export function renderOffline() {
+  return page(
+    "Offline — Front Desk",
+    "The board could not be read because this device is offline.",
+    `    <h1>Desk</h1>
+      <div class="stamp stamp--stale"><strong>You are offline.</strong> This board is read live on
+        every request, so there is nothing to show you — no cached copy is kept, deliberately: a
+        stale board with no way to say how stale is worse than an honest gap.</div>
+      <p class="muted">It will load as soon as you have a connection. Nothing was lost.</p>`,
+    APP_HEAD,
   );
 }
