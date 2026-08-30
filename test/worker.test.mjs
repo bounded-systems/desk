@@ -246,3 +246,72 @@ test("the app routes are matched BEFORE the catch-all", async () => {
   const res = await get("desk.bounded.tools", "/manifest.webmanifest");
   assert.ok(!/^text\/html/.test(res.headers.get("content-type")), "fell through to the page");
 });
+
+// ── The notification opt-in (#766) ───────────────────────────────────────────
+//
+// The control is useless without script, a service worker and an installed app,
+// and a dead button is worse than none — this page's whole posture is that it
+// never shows something it cannot vouch for. So the assertions are about what it
+// refuses to promise as much as what it serves.
+
+test("desk serves the opt-in script as JavaScript", async () => {
+  const res = await get("desk.bounded.tools", "/notify.js");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /^text\/javascript/);
+});
+
+test("the opt-in script is desk-only, like the other app assets", async () => {
+  for (const host of STATIC_HOSTS) {
+    const res = await get(host, "/notify.js");
+    assert.ok(!/^text\/javascript/.test(res.headers.get("content-type") ?? ""),
+      `${host} must not serve the opt-in script`);
+  }
+});
+
+test("every unavailable path ends in a sentence, not silence", async () => {
+  // Permission can be unavailable in ways that look identical from outside: no
+  // support, not installed, already denied. Each must say which.
+  const js = await (await get("desk.bounded.tools", "/notify.js")).text();
+  assert.match(js, /cannot deliver web notifications/);
+  assert.match(js, /Add to Home Screen/);
+  assert.match(js, /blocked for this site/);
+  assert.match(js, /Permission was not granted/);
+});
+
+test("the button is only offered when pressing it can do something", async () => {
+  const js = await (await get("desk.bounded.tools", "/notify.js")).text();
+  // `denied` is not re-promptable — offering the button there would offer a
+  // no-op — so that branch must pass `false` for the button.
+  assert.match(js, /permission === "denied"[\s\S]{0,200}show\([^)]*false\)/);
+  assert.match(js, /permission === "granted"[\s\S]{0,300}show\([^)]*false\)/);
+});
+
+test("it does NOT claim delivery works, because it does not yet", async () => {
+  // The sender does not exist. Saying "you're all set" would be exactly the
+  // false-green this board keeps finding elsewhere — an inert path reading as
+  // wired (#779), a summary reporting health it never measured (#809).
+  const js = await (await get("desk.bounded.tools", "/notify.js")).text();
+  assert.match(js, /Delivery is not switched on yet/);
+  // Comments stripped first: the script EXPLAINS why it must not say "you're
+  // all set", so a check over the whole file fires on its own documentation —
+  // and deleting the explanation would be the cheapest route to green. Same
+  // trap _workflow-lint.yml records for shellcheck directives in prose.
+  const code = js.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  assert.ok(!/you'?re all set/i.test(code));
+});
+
+test("the opt-in block is rendered on desk and on no other host", async () => {
+  const deskHtml = await (await get("desk.bounded.tools")).text();
+  assert.match(deskHtml, /id="notify"/);
+  assert.match(deskHtml, /src="\/notify\.js"/);
+  for (const host of STATIC_HOSTS) {
+    const html = await (await get(host)).text();
+    assert.ok(!/id="notify"/.test(html), `${host} must not render the opt-in`);
+    assert.ok(!/notify\.js/.test(html), `${host} must not load script`);
+  }
+});
+
+test("the block ships hidden — a dead control must not appear without script", async () => {
+  const deskHtml = await (await get("desk.bounded.tools")).text();
+  assert.match(deskHtml, /<section class="notify" id="notify" hidden>/);
+});
