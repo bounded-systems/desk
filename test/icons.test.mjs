@@ -9,7 +9,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { AVATAR_SVG, AVATAR_460, AVATAR_1024, iconBytes } from "../src/icons.js";
-import { ASSETS, vendored } from "../scripts/make-icons.mjs";
+import { ASSETS, MANIFEST, sha256, vendored } from "../scripts/make-icons.mjs";
+
+test("the committed bytes match their recorded hashes — no install needed", async () => {
+  // This is the half that runs EVERYWHERE. The package comparison below can only
+  // run where the devDependency is installed, and CI does not install, so on its
+  // own it would be a check that silently skips (`.github`#789's failure).
+  const record = JSON.parse(await readFile(MANIFEST, "utf8"));
+  assert.equal(record.package, "@bounded-systems/brand");
+  assert.match(record.version, /^\d+\.\d+\.\d+/);
+  assert.equal(Object.keys(record.files).length, ASSETS.length, "every vendored file is recorded");
+  for (const [, to] of ASSETS) {
+    assert.equal(sha256(await readFile(to)), record.files[to], `${to} does not match its recorded hash`);
+  }
+});
 
 test("what is committed is byte-identical to @bounded-systems/brand", async (t) => {
   let pkg;

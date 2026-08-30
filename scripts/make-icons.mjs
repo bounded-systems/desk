@@ -13,10 +13,20 @@
  * so a bump that changes the mark cannot land silently.
  */
 import { readFile, writeFile, copyFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const pkgRoot = require.resolve("@bounded-systems/brand/package.json").replace(/package\.json$/, "");
+
+/**
+ * Resolved LAZILY. Doing this at module scope threw on import wherever the
+ * devDependency was not installed, which took the whole test file down as a
+ * single failure rather than letting its drift check skip — CI run 99338291031.
+ * A module that cannot be imported cannot report anything about itself.
+ */
+function pkgRoot() {
+  return require.resolve("@bounded-systems/brand/package.json").replace(/package\.json$/, "");
+}
 
 // The AVATAR, not the mark. The mark is a bare glyph meant to sit on whatever is
 // behind it; the avatar is the same glyph on its own #0C5A42 plate, which is
@@ -28,19 +38,34 @@ export const ASSETS = [
   ["avatar/avatar-forest-1024.png", "brand/avatar-forest-1024.png"],
 ];
 
+export const MANIFEST = "brand/vendored.json";
+
+export const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+
 export async function vendored() {
   const out = {};
   for (const [from, to] of ASSETS) {
-    out[to] = await readFile(pkgRoot + from);
+    out[to] = await readFile(pkgRoot() + from);
   }
   return out;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  const version = JSON.parse(await readFile(pkgRoot() + "package.json", "utf8")).version;
+  const record = { package: "@bounded-systems/brand", version, files: {} };
   for (const [from, to] of ASSETS) {
-    await copyFile(pkgRoot + from, to);
+    await copyFile(pkgRoot() + from, to);
+    record.files[to] = sha256(await readFile(to));
     console.log(`  ${to}`);
   }
+  // A HASH MANIFEST, so the drift check works WITHOUT the devDependency. CI does
+  // not install, so a test that can only compare against node_modules skips
+  // there — and a check that silently skips is the failure `.github`#789
+  // records, where a rule was absent in 89 of 91 repos and every run still
+  // printed a clean summary. This file is committed alongside the bytes, so an
+  // edit to either without the other is caught everywhere.
+  await writeFile(MANIFEST, JSON.stringify(record, null, 2) + "\n");
+  console.log(`  ${MANIFEST} (brand ${version})`);
   const b64 = async (p) => (await readFile(p)).toString("base64");
   const src = `// The bounded.tools app icon, embedded (#51).
 //

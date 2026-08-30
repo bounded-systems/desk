@@ -1,0 +1,9 @@
+{
+  "package": "@bounded-systems/brand",
+  "version": "2.0.0",
+  "files": {
+    "brand/avatar-forest.svg": "60651676678c32c097d57d34bb82a72522d2d62f7d4efa71e43936ad869d51ee",
+    "brand/avatar-forest-460.png": "3bd67491c709db0257f5bc38c52ac222a402eafaa3c37889491181ac1ef8c68c",
+    "brand/avatar-forest-1024.png": "6b7808ed4d945b88beba259c63b15bc1615adb0ff2b93000215b6a06c96828d4"
+  }
+}
