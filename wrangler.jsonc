@@ -54,6 +54,34 @@
   // The Worker refuses to render anything that does not identify itself as the
   // `front-desk-public` feed, so pointing this at the wrong place — the private
   // projection above all — fails closed rather than leaking private issue titles.
+  // ── NOT YET DECLARED: the subscription store and the VAPID keypair (#37) ──
+  //
+  // Both need account access this repo's CI does not have, so they are listed
+  // here rather than attempted. Until they exist, /subscribe answers 503 and
+  // the opt-in says plainly that no signing key is configured — the Worker
+  // deploys and works, it just cannot notify anyone yet.
+  //
+  //   1. A KV namespace, then the binding:
+  //        wrangler kv namespace create SUBSCRIPTIONS
+  //        "kv_namespaces": [{ "binding": "SUBSCRIPTIONS", "id": "<the id>" }]
+  //      Declaring the binding with a placeholder id would fail every deploy of
+  //      the whole Worker, which is why it is absent rather than stubbed.
+  //
+  //   2. The VAPID keypair, generated ONCE and locally — the private half must
+  //      never pass through a workflow log or an agent session:
+  //        npx web-push generate-vapid-keys
+  //        wrangler secret put VAPID_PRIVATE_KEY     # the 32-byte scalar
+  //      then the PUBLIC half as a var below (it is not a secret — it is served
+  //      to every visitor inside /notify.js):
+  //        "VAPID_PUBLIC_KEY": "<the 65-byte point, base64url>"
+  //      and a contact the push service can reach:
+  //        "VAPID_SUBJECT": "mailto:…"
+  //
+  // ROTATING THE PUBLIC KEY INVALIDATES EVERY STORED SUBSCRIPTION — a browser
+  // binds each one to the applicationServerKey it was created with, so there is
+  // no two-slot overlap the way rotate-lease-key has, and every device must
+  // re-subscribe. Rotate on actual disclosure, not on a cadence.
+
   "vars": {
     "FEED_URL": "https://raw.githubusercontent.com/bounded-systems/front-desk-feed/feed/front-desk-public.json",
     // The PR feed, published by the SAME front-desk-feed run as the desk feed
