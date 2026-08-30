@@ -232,16 +232,26 @@ jobs:
         if: ${{ inputs.provision }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.token.outputs.token }}
-          TITLE: bounded-desk-SUBSCRIPTIONS
+          BINDING: SUBSCRIPTIONS
+          SCRIPT: bounded-desk
         run: |
           set -euo pipefail
           # IDEMPOTENT BY LOOKUP. A partial earlier run may already have created
           # it, and a SECOND namespace would bind the Worker to an empty store
           # while the real subscriptions sat in the orphan — a failure that reads
           # downstream as "nobody has subscribed".
+          #
+          # MATCH BOTH TITLE SHAPES, and that is measured rather than assumed.
+          # Run 33338834157 created the namespace and then failed to find it:
+          # this looked only for "<script>-<BINDING>", the older convention,
+          # while wrangler 4 titled it "SUBSCRIPTIONS" flat. Creating a namespace
+          # and then reporting it missing is the worst of both — the resource
+          # exists, unbound and unnamed by the config. So accept either, rather
+          # than pin a vendor naming detail this lane has no reason to know.
           find_id() {
             npx --yes wrangler@4 kv namespace list 2>/dev/null \
-              | jq -r --arg t "$TITLE" '.[] | select(.title==$t) | .id' | head -1
+              | jq -r --arg a "$BINDING" --arg b "${SCRIPT}-${BINDING}" \
+                  '.[] | select(.title==$a or .title==$b) | .id' | head -1
           }
           id="$(find_id || true)"
           if [ -n "$id" ]; then
@@ -250,7 +260,7 @@ jobs:
             npx --yes wrangler@4 kv namespace create SUBSCRIPTIONS
             id="$(find_id || true)"
           fi
-          [ -n "$id" ] || { echo "::error::could not create or find $TITLE"; exit 1; }
+          [ -n "$id" ] || { echo "::error::could not create or find a KV namespace titled \"$BINDING\" or \"${SCRIPT}-${BINDING}\""; exit 1; }
           echo "id=$id" >> "$GITHUB_OUTPUT"
           echo "✓ namespace $id"
 
