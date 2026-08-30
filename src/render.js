@@ -223,8 +223,8 @@ const STYLE = `
  */
 const APP_HEAD = `
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="apple-touch-icon" href="/icon-180.png">
-  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">`;
+  <link rel="apple-touch-icon" href="/icon-460.png">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">`;
 
 function page(title, description, body, headExtra = "") {
   return `<!doctype html>

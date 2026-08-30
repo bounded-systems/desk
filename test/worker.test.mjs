@@ -581,26 +581,39 @@ test("/notify exists on desk and nowhere else", async () => {
 // ── the icon, and the manifest that was never linked (#51) ───────────────────
 
 test("the Home Screen icon is served, not a letter", async () => {
-  for (const [path, size] of [["/icon-180.png", 180], ["/icon-192.png", 192], ["/icon-512.png", 512]]) {
+  const svg = await get("desk.bounded.tools", "/icon.svg");
+  assert.equal(svg.status, 200);
+  assert.match(svg.headers.get("content-type"), /image\/svg\+xml/);
+  const body = await svg.text();
+  // The two details a 32px reconstruction lost: the door's gap, and the rounded
+  // square inside it.
+  assert.match(body, /M57\.5 81/);
+  assert.match(body, /L42\.5 81/);
+  assert.match(body, /width="12" height="12"/);
+
+  for (const [path, size] of [["/icon-460.png", 460], ["/icon-1024.png", 1024]]) {
     const res = await get("desk.bounded.tools", path);
     assert.equal(res.status, 200, path);
     assert.equal(res.headers.get("content-type"), "image/png", path);
     const b = new Uint8Array(await res.arrayBuffer());
     assert.ok(b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47, `${path} is a PNG`);
-    // Width lives at byte 16 of a PNG, big-endian — so this pins the actual
-    // pixels rather than trusting the filename.
+    // Width lives at byte 16 of a PNG, big-endian — read the pixels, not the name.
     const w = (b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19];
     assert.equal(w, size, `${path} really is ${size}px`);
   }
 });
 
-test("the manifest offers icons, and offers them as maskable", async () => {
+test("the manifest offers the SVG first, and everything maskable", async () => {
   const m = await (await get("desk.bounded.tools", "/manifest.webmanifest")).json();
   assert.equal(m.icons.length, 2);
+  // Vector first: it scales to whatever a launcher asks for, so there is no size
+  // to keep in sync with a file.
+  assert.equal(m.icons[0].type, "image/svg+xml");
+  assert.equal(m.icons[0].sizes, "any");
+  assert.equal(m.icons[1].type, "image/png");
   for (const i of m.icons) {
-    assert.equal(i.type, "image/png");
     // Declaring only "any" makes Android draw a white plate behind a full-bleed
-    // icon; these bleed to the edge deliberately.
+    // icon; the avatar bleeds to the edge deliberately.
     assert.match(i.purpose, /maskable/);
   }
 });
@@ -610,7 +623,7 @@ test("THE PAGE LINKS THE MANIFEST — it never did, which is why iOS showed a le
   assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest">/);
   // Separate and not redundant: iOS reads apple-touch-icon for the Home Screen
   // and does not take manifest icons for that purpose.
-  assert.match(html, /<link rel="apple-touch-icon" href="\/icon-180\.png">/);
+  assert.match(html, /<link rel="apple-touch-icon" href="\/icon-460\.png">/);
 });
 
 test("the app-shell head appears on desk and on no other host", async () => {
@@ -626,7 +639,7 @@ test("the static hosts 404 the app-shell paths instead of serving a page as one"
   // to the board, so /manifest.webmanifest answered 200 with text/html. A check
   // that only reads the status would call the asset present.
   for (const host of STATIC_HOSTS) {
-    for (const path of ["/manifest.webmanifest", "/sw.js", "/notify.js", "/icon-192.png"]) {
+    for (const path of ["/manifest.webmanifest", "/sw.js", "/notify.js", "/icon.svg", "/icon-1024.png"]) {
       const res = await get(host, path);
       assert.equal(res.status, 404, `${host}${path}`);
     }
