@@ -150,3 +150,99 @@ test("a write method is refused before any feed is read", async () => {
   assert.equal(res.status, 405);
   assert.equal(res.headers.get("allow"), "GET, HEAD");
 });
+
+// ── The installable app, and the surfaces that must NOT become one (#766) ────
+//
+// Web Push on iOS needs a Home-Screen app backed by a manifest AND a registered
+// service worker, and a service worker is script — which desk's CSP forbade.
+// Three things therefore had to move together, and each can regress on its own:
+// the assets must exist with the right content types, the CSP must permit script
+// on desk, and it must STILL forbid it everywhere else.
+//
+// The last is the one worth guarding hardest. Four surfaces share this Worker,
+// so a single header would have granted script to all four silently.
+
+const STATIC_HOSTS = ["issues.bounded.tools", "claims.bounded.tools", "prs.bounded.tools"];
+
+test("desk serves a real manifest, correctly typed", async () => {
+  // The defect this replaces: every path fell through to the page, so
+  // /manifest.json answered 200 with text/html. A status-only check reads that
+  // as present, which is how it went unnoticed — so the TYPE is asserted, not
+  // just the status.
+  const res = await get("desk.bounded.tools", "/manifest.webmanifest");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /^application\/manifest\+json/);
+  const m = JSON.parse(await res.text());
+  // `display: standalone` is the part iOS actually requires before it will
+  // treat the pinned page as an app at all.
+  assert.equal(m.display, "standalone");
+  assert.equal(m.scope, "/");
+  assert.equal(m.start_url, "/");
+});
+
+test("desk serves a service worker as JavaScript, uncached", async () => {
+  const res = await get("desk.bounded.tools", "/sw.js");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /^text\/javascript/);
+  // A stale service worker outlives a deploy and keeps serving old behaviour to
+  // an installed app — the hardest staleness to notice or clear from outside.
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  const body = await res.text();
+  assert.match(body, /addEventListener\("push"/);
+  assert.match(body, /addEventListener\("notificationclick"/);
+});
+
+test("the service worker caches nothing", async () => {
+  // Deliberate: the board's whole value is being current. A caching worker would
+  // serve a stale board from the installed app with no staleness banner —
+  // reintroducing offline exactly the defect this Worker exists to remove.
+  const body = await (await get("desk.bounded.tools", "/sw.js")).text();
+  for (const forbidden of ["caches.open", "cache.put", "cache.match", "addEventListener(\"fetch\""]) {
+    assert.ok(!body.includes(forbidden), `service worker must not ${forbidden}`);
+  }
+});
+
+test("desk's CSP permits script from self and nothing else", async () => {
+  const csp = (await get("desk.bounded.tools")).headers.get("content-security-policy");
+  assert.match(csp, /script-src 'self'/);
+  assert.match(csp, /worker-src 'self'/);
+  assert.match(csp, /manifest-src 'self'/);
+  // No inline, no CDN. Everything is served from this origin, so nothing else
+  // needs allowing — and 'unsafe-inline' for script is never introduced.
+  assert.ok(!/script-src[^;]*unsafe-inline/.test(csp), "script must never be unsafe-inline");
+  assert.ok(!/script-src[^;]*https?:/.test(csp), "no external script origin");
+});
+
+test("THE GUARD: the other three surfaces still run no script at all", async () => {
+  // One Worker, four hosts. A single shared header would have granted script to
+  // all four, and nothing on those pages needs it.
+  for (const host of STATIC_HOSTS) {
+    const csp = (await get(host)).headers.get("content-security-policy");
+    assert.ok(!csp.includes("script-src"), `${host} must not grant script-src`);
+    assert.match(csp, /default-src 'none'/, host);
+  }
+});
+
+test("the app assets are desk-only", async () => {
+  // claims/issues/prs are read-only boards with no reason to be installable;
+  // offering a manifest there would prompt an install that gains nothing.
+  for (const host of STATIC_HOSTS) {
+    for (const path of ["/manifest.webmanifest", "/sw.js"]) {
+      const res = await get(host, path);
+      assert.notEqual(
+        res.headers.get("content-type"),
+        "application/manifest+json; charset=utf-8",
+        `${host}${path} must not serve a manifest`,
+      );
+      assert.ok(!/^text\/javascript/.test(res.headers.get("content-type") ?? ""),
+        `${host}${path} must not serve a service worker`);
+    }
+  }
+});
+
+test("the app routes are matched BEFORE the catch-all", async () => {
+  // The ordering IS the fix. If these fall through, they answer 200 text/html —
+  // the original defect, which looks like success to any status-only check.
+  const res = await get("desk.bounded.tools", "/manifest.webmanifest");
+  assert.ok(!/^text\/html/.test(res.headers.get("content-type")), "fell through to the page");
+});
