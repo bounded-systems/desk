@@ -166,7 +166,14 @@ const STYLE = `
       padding-bottom:.4rem; border-bottom:2px solid var(--line); }
     .sec__n { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86rem; color:var(--muted); flex:none; }
     .sec__more { margin:.6rem 0 0; }
-    footer { margin-top:2.5rem; padding-top:1.25rem; border-top:1px solid var(--line); }`;
+    footer { margin-top:2.5rem; padding-top:1.25rem; border-top:1px solid var(--line); }
+    .notify { margin-top:2.5rem; padding:1rem 1.25rem; border:1px solid var(--line);
+              border-radius:.6rem; background:var(--card); }
+    .notify h2 { margin:0 0 .35rem; }
+    .notify p { margin:.35rem 0; }
+    .notify button { font:inherit; padding:.5rem 1rem; border-radius:.5rem; cursor:pointer;
+                     border:1px solid var(--accent); background:var(--accent); color:var(--bg); }
+    .notify button:disabled { opacity:.6; cursor:default; }`;
 
 function page(title, description, body) {
   return `<!doctype html>
@@ -450,6 +457,41 @@ function overviewSection(s) {
  * summarised here. The desk's own job is no longer to BE one of the lists; it is
  * to say how much of each there is and hand the reader to the right one.
  */
+/**
+ * The notification opt-in, on the overview page only (#766).
+ *
+ * WHY A BUTTON AND NOT AN AUTOMATIC PROMPT. `Notification.requestPermission()`
+ * must be called from a user gesture — Safari ignores it otherwise, and a
+ * permission dialog nobody asked for is the fastest way to get a permanent
+ * "denied" that cannot be re-prompted. So the ask is deliberate and one click
+ * away, never on load.
+ *
+ * WHY IT IS HIDDEN BY DEFAULT AND REVEALED BY SCRIPT. The control is useless
+ * without JavaScript, a service worker, and an installed app, and a dead button
+ * is worse than none — this page's whole posture is that it never shows
+ * something it cannot vouch for. So the markup ships `hidden` and the script
+ * un-hides it only once it has established that this browser can actually do
+ * the thing. On the three static hosts, which carry no `script-src`, the block
+ * is never rendered at all.
+ *
+ * WHY IT REPORTS iOS'S RULE RATHER THAN JUST FAILING. On iOS, Web Push works
+ * only from a Home-Screen app. A visitor in Safari who taps and gets nothing
+ * learns nothing; being told "add this to your Home Screen first" is the
+ * difference between a broken button and an instruction.
+ *
+ * The subscription itself is NOT here. Storing one needs a VAPID key and an
+ * identity to attach it to, which is the Face ID decision on #766. Permission
+ * plus a registered worker is the half that stands alone and is testable now.
+ */
+function notifyOptIn() {
+  return `<section class="notify" id="notify" hidden>
+        <h2>Notifications</h2>
+        <p class="muted" id="notify-state">Checking whether this browser can notify…</p>
+        <p><button type="button" id="notify-btn" hidden>Enable notifications</button></p>
+      </section>
+      <script src="/notify.js"></script>`;
+}
+
 export function renderOverview(d, now = Date.now(), edgeTtlSeconds = 60) {
   const description =
     "The whole desk at a glance: what is open, what is claimed, and what is worth picking up next — each summarised from the feed its own host serves.";
@@ -482,6 +524,7 @@ export function renderOverview(d, now = Date.now(), edgeTtlSeconds = 60) {
       ${head}
       ${incomplete}
       ${d.sections.map(overviewSection).join("\n")}
+      ${notifyOptIn()}
       <footer><p class="muted">Each host answers exactly one question, reads the feed live on every
         request, and fails closed rather than showing an empty list it cannot vouch for.</p></footer>`,
   );
