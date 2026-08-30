@@ -314,7 +314,27 @@ jobs:
           # rule: one embedded in YAML is one nobody can run, and this decides
           # which store the Worker binds to.
           node scripts/wire-provisioned.mjs wrangler.jsonc
-          node --test test/*.test.mjs
+
+          # VALIDATE THE RESULT, do not re-run the suite. The tripwire before the
+          # ceremony already ran all 161 tests on the unwired tree; re-running
+          # them here tests nothing new about this deploy and asserts something
+          # FALSE — three of them read the real wrangler.jsonc and require it to
+          # be unwired, which after the line above it deliberately is not.
+          # Run 33339110755 died exactly there, having already minted a keypair.
+          #
+          # What actually matters before deploying is the postcondition: the file
+          # still parses, and carries both bindings.
+          node -e '
+            const fs = require("fs");
+            const raw = fs.readFileSync("wrangler.jsonc", "utf8");
+            const cfg = JSON.parse(raw.split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n"));
+            const kv = (cfg.kv_namespaces || []).find(n => n.binding === "SUBSCRIPTIONS");
+            if (!kv || !kv.id) throw new Error("SUBSCRIPTIONS binding missing after wiring");
+            if (!cfg.vars || !cfg.vars.VAPID_PUBLIC_KEY) throw new Error("VAPID_PUBLIC_KEY missing after wiring");
+            if (!cfg.vars.VAPID_SUBJECT) throw new Error("VAPID_SUBJECT missing after wiring");
+            if (!cfg.routes || cfg.routes.length !== 4) throw new Error("the four hosts did not survive wiring");
+            console.log("✓ wrangler.jsonc parses, binds " + kv.id + ", and keeps all four routes");
+          '
 
       - name: wrangler deploy
         id: deploy
