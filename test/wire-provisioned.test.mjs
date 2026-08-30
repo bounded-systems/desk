@@ -9,23 +9,64 @@ const ARGS = { kvId: "abc123", vapidPublic: "BTestPublicKey", vapidSubject: "mai
 const strip = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 const parse = (s) => JSON.parse(strip(s));
 
-test("the real wrangler.jsonc still parses, and gains both bindings", () => {
-  const out = wire(fs.readFileSync("wrangler.jsonc", "utf8"), ARGS);
-  const cfg = parse(out);
+// A stand-in for the shape wrangler.jsonc had BEFORE provisioning. These used
+// to read the real file, which was correct exactly once: the moment desk was
+// provisioned (#42) the real file became wired for good, and a test requiring
+// it to be unwired became permanently false. It failed the provisioning run
+// itself. A fixture is the honest home for "what does wiring do"; what the real
+// file deserves is a test of what it IS, which is the one below.
+const UNWIRED = `{
+  "name": "bounded-desk",
+  "main": "src/worker.js",
+
+  "routes": [
+    { "pattern": "desk.bounded.tools", "custom_domain": true },
+    { "pattern": "issues.bounded.tools", "custom_domain": true },
+    { "pattern": "claims.bounded.tools", "custom_domain": true },
+    { "pattern": "prs.bounded.tools", "custom_domain": true }
+  ],
+
+  "vars": {
+    "FEED_URL": "https://feed.example/board.json",
+    "DESK_LIMIT": "25"
+  }
+}`;
+
+test("wiring adds both bindings", () => {
+  const cfg = parse(wire(UNWIRED, ARGS));
   assert.deepEqual(cfg.kv_namespaces, [{ binding: "SUBSCRIPTIONS", id: "abc123" }]);
   assert.equal(cfg.vars.VAPID_PUBLIC_KEY, "BTestPublicKey");
   assert.equal(cfg.vars.VAPID_SUBJECT, "mailto:desk@bounded.tools");
 });
 
 test("nothing that was already there is lost", () => {
-  const before = parse(fs.readFileSync("wrangler.jsonc", "utf8"));
-  const after = parse(wire(fs.readFileSync("wrangler.jsonc", "utf8"), ARGS));
+  const before = parse(UNWIRED);
+  const after = parse(wire(UNWIRED, ARGS));
   assert.equal(after.name, before.name);
   assert.equal(after.main, before.main);
   assert.equal(after.routes.length, before.routes.length, "all four hosts survive");
   for (const k of Object.keys(before.vars)) {
     assert.equal(after.vars[k], before.vars[k], `var ${k} survives`);
   }
+});
+
+// WHAT THE REAL FILE IS, not what wiring would do to it. This is the test that
+// would actually catch a bad deploy: a binding pointing at no namespace, or a
+// public key that is not a P-256 point, means every push 401s at once and the
+// symptom is silence.
+test("the shipped wrangler.jsonc is wired, and wired correctly", () => {
+  const cfg = parse(fs.readFileSync("wrangler.jsonc", "utf8"));
+
+  const kv = (cfg.kv_namespaces || []).find((n) => n.binding === "SUBSCRIPTIONS");
+  assert.ok(kv, "the SUBSCRIPTIONS binding must be present");
+  assert.match(kv.id, /^[0-9a-f]{32}$/, "a real Cloudflare namespace id");
+
+  const pub = Buffer.from(cfg.vars.VAPID_PUBLIC_KEY, "base64url");
+  assert.equal(pub.length, 65, "an uncompressed P-256 point is 65 bytes");
+  assert.equal(pub[0], 4, "and starts with the uncompressed tag");
+
+  assert.match(cfg.vars.VAPID_SUBJECT, /^(mailto:|https:)/, "a contact a push service can reach");
+  assert.equal(cfg.routes.length, 4, "all four hosts");
 });
 
 test("the 'not yet declared' note is removed, so no comment contradicts the config", () => {
@@ -70,8 +111,10 @@ test("the note is not removed when it sits BELOW the vars block", () => {
 test("wiring an already-wired config is refused, not applied twice", () => {
   // JSON takes the LAST duplicate key, so a second pass would parse fine and
   // leave a dead binding above the live one — correct-looking, and wrong.
-  const once = wire(fs.readFileSync("wrangler.jsonc", "utf8"), ARGS);
-  assert.throws(() => wire(once, ARGS), /already wired/);
+  assert.throws(() => wire(wire(UNWIRED, ARGS), ARGS), /already wired/);
+  // And the real file, now genuinely wired, is refused for the same reason —
+  // which is the guard doing its job rather than a test artefact.
+  assert.throws(() => wire(fs.readFileSync("wrangler.jsonc", "utf8"), ARGS), /already wired/);
 });
 
 test("a config that only MENTIONS the keys in prose is still wireable", () => {
