@@ -207,7 +207,26 @@ const STYLE = `
                      background:var(--accent); color:var(--bg); }
     .notify button:disabled { opacity:.6; cursor:default; }`;
 
-function page(title, description, body) {
+/**
+ * The app-shell head, desk only (#51).
+ *
+ * THE MANIFEST WAS NEVER LINKED. The Worker has served /manifest.webmanifest
+ * since #766, and nothing referenced it — so no browser ever read it. That is
+ * why iOS installed the app as a grey letter "D": with no manifest reachable it
+ * had neither an icon nor a name to work from, and fell back to the first
+ * character of the title. A file served but unlinked is a file that does not
+ * exist, and the read-back probe that checked /manifest.webmanifest answered 200
+ * could not see the difference.
+ *
+ * apple-touch-icon is separate and not redundant: iOS reads it for the Home
+ * Screen and does not take manifest icons for that purpose.
+ */
+const APP_HEAD = `
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">`;
+
+function page(title, description, body, headExtra = "") {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -215,7 +234,7 @@ function page(title, description, body) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${esc(title)}</title>
   <meta name="description" content="${esc(description)}">
-  <meta name="theme-color" content="#0C5A42">
+  <meta name="theme-color" content="#0C5A42">${headExtra}
   <style>${STYLE}</style>
 </head>
 <body>
@@ -559,6 +578,7 @@ export function renderOverview(d, now = Date.now(), edgeTtlSeconds = 60) {
       ${notifyOptIn()}
       <footer><p class="muted">Each host answers exactly one question, reads the feed live on every
         request, and fails closed rather than showing an empty list it cannot vouch for.</p></footer>`,
+    APP_HEAD,
   );
 }
 

@@ -52,9 +52,22 @@ const TEST_VAPID_PUBLIC = "BExampleTestPublicKeyValue";
 /** A KV stand-in, per test, so one test's subscriptions never reach another's. */
 const kvStub = () => {
   const map = new Map();
-  return { map, put: async (k, v) => void map.set(k, v), get: async (k) => map.get(k) ?? null,
-           delete: async (k) => void map.delete(k),
-           list: async () => ({ keys: [...map.keys()].map((name) => ({ name })), list_complete: true }) };
+  return {
+    map,
+    // The options bag matters: putApproval passes expirationTtl, and a stub that
+    // drops it would let a record outlive the ceremony it describes.
+    put: async (k, v, _opts) => void map.set(k, v),
+    get: async (k) => map.get(k) ?? null,
+    delete: async (k) => void map.delete(k),
+    // HONOUR THE PREFIX, as real KV does. A stub that ignores it returned
+    // `pending:approval` as if it were a subscription, and the fan-out then tried
+    // to parse "undefined" as a push endpoint. The store holds more than one kind
+    // of record now, so the filter is load-bearing rather than decorative.
+    list: async ({ prefix = "" } = {}) => ({
+      keys: [...map.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })),
+      list_complete: true,
+    }),
+  };
 };
 const KEYED_ENV = { ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC, SUBSCRIPTIONS: kvStub() };
 
@@ -563,4 +576,161 @@ test("/notify exists on desk and nowhere else", async () => {
   for (const host of STATIC_HOSTS) {
     assert.equal((await notify(token, env, host)).status, 404, host);
   }
+});
+
+// ── the icon, and the manifest that was never linked (#51) ───────────────────
+
+test("the Home Screen icon is served, not a letter", async () => {
+  for (const [path, size] of [["/icon-180.png", 180], ["/icon-192.png", 192], ["/icon-512.png", 512]]) {
+    const res = await get("desk.bounded.tools", path);
+    assert.equal(res.status, 200, path);
+    assert.equal(res.headers.get("content-type"), "image/png", path);
+    const b = new Uint8Array(await res.arrayBuffer());
+    assert.ok(b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47, `${path} is a PNG`);
+    // Width lives at byte 16 of a PNG, big-endian — so this pins the actual
+    // pixels rather than trusting the filename.
+    const w = (b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19];
+    assert.equal(w, size, `${path} really is ${size}px`);
+  }
+});
+
+test("the manifest offers icons, and offers them as maskable", async () => {
+  const m = await (await get("desk.bounded.tools", "/manifest.webmanifest")).json();
+  assert.equal(m.icons.length, 2);
+  for (const i of m.icons) {
+    assert.equal(i.type, "image/png");
+    // Declaring only "any" makes Android draw a white plate behind a full-bleed
+    // icon; these bleed to the edge deliberately.
+    assert.match(i.purpose, /maskable/);
+  }
+});
+
+test("THE PAGE LINKS THE MANIFEST — it never did, which is why iOS showed a letter", async () => {
+  const html = await (await get("desk.bounded.tools")).text();
+  assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest">/);
+  // Separate and not redundant: iOS reads apple-touch-icon for the Home Screen
+  // and does not take manifest icons for that purpose.
+  assert.match(html, /<link rel="apple-touch-icon" href="\/icon-180\.png">/);
+});
+
+test("the app-shell head appears on desk and on no other host", async () => {
+  for (const host of STATIC_HOSTS) {
+    const html = await (await get(host)).text();
+    assert.ok(!/rel="manifest"/.test(html), `${host} must not offer an install`);
+    assert.ok(!/apple-touch-icon/.test(html), host);
+  }
+});
+
+test("the static hosts 404 the app-shell paths instead of serving a page as one", async () => {
+  // #766 fixed this for desk and left the other three: every path fell through
+  // to the board, so /manifest.webmanifest answered 200 with text/html. A check
+  // that only reads the status would call the asset present.
+  for (const host of STATIC_HOSTS) {
+    for (const path of ["/manifest.webmanifest", "/sw.js", "/notify.js", "/icon-192.png"]) {
+      const res = await get(host, path);
+      assert.equal(res.status, 404, `${host}${path}`);
+    }
+    assert.equal((await get(host)).status, 200, `${host} still renders its board`);
+  }
+});
+
+// ── approvals reach a phone (#51) ────────────────────────────────────────────
+
+const APPROVAL = {
+  title: "Approve broker-deploy",
+  body: "A run wants an account-wide Workers:Edit token.",
+  url: "https://keeper.bounded.tools/a/abc123",
+};
+
+const approve = (body, env, host = "desk.bounded.tools", token = null) =>
+  worker.fetch(new Request(`https://${host}/approval`, {
+    method: "POST",
+    headers: token ? { authorization: `Bearer ${token}`, "content-type": "application/json" }
+                   : { "content-type": "application/json" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  }), env);
+
+test("/pending serves the board default until something is pending", async () => {
+  const env = await vapidEnv();
+  const d = await (await get("desk.bounded.tools", "/pending", env)).json();
+  assert.equal(d.kind, "board");
+  assert.equal(d.body, "The board changed.");
+});
+
+test("an approval is recorded and fanned out, and /pending then names it", async () => {
+  const env = await vapidEnv();
+  await seed(env, "a");
+  stubOidcAndPush();
+  const res = await approve(APPROVAL, env, "desk.bounded.tools", await ISS.mint());
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).sent, 1, "the approval went out to the subscribed device");
+
+  const d = await (await get("desk.bounded.tools", "/pending", env)).json();
+  assert.equal(d.kind, "approval");
+  assert.equal(d.title, "Approve broker-deploy");
+  assert.equal(d.url, APPROVAL.url);
+});
+
+test("it is RECORDED BEFORE it is sent", async () => {
+  // Otherwise the worker wakes, fetches /pending, finds nothing, and tells the
+  // reader the board changed when what happened is someone needs a Face ID.
+  const env = await vapidEnv();
+  await seed(env, "a");
+  let pendingAtPushTime = null;
+  globalThis.fetch = async (url) => {
+    const href = typeof url === "string" ? url : url.url;
+    if (href.includes("/.well-known/jwks")) return new Response(JSON.stringify({ keys: ISS.jwks }), { status: 200 });
+    pendingAtPushTime = await env.SUBSCRIPTIONS.get("pending:approval");
+    return new Response(null, { status: 201 });
+  };
+  await approve(APPROVAL, env, "desk.bounded.tools", await ISS.mint());
+  assert.ok(pendingAtPushTime, "the record must exist before the push leaves");
+});
+
+test("an unauthorized caller records nothing and sends nothing", async () => {
+  const env = await vapidEnv();
+  await seed(env, "a");
+  stubOidcAndPush();
+  assert.equal((await approve(APPROVAL, env)).status, 401);
+  const wrong = await ISS.mint({ workflowRef: "bounded-systems/desk/.github/workflows/evil.yml@refs/heads/main" });
+  assert.equal((await approve(APPROVAL, env, "desk.bounded.tools", wrong)).status, 403);
+  assert.equal(await env.SUBSCRIPTIONS.get("pending:approval"), null, "nothing was recorded");
+});
+
+test("a destination that is not the keeper is refused", async () => {
+  const env = await vapidEnv();
+  stubOidcAndPush();
+  const res = await approve({ ...APPROVAL, url: "https://evil.example/a/x" }, env, "desk.bounded.tools", await ISS.mint());
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /keeper/);
+});
+
+test("/approval exists on desk and nowhere else", async () => {
+  const env = await vapidEnv();
+  stubOidcAndPush();
+  const token = await ISS.mint();
+  for (const host of STATIC_HOSTS) {
+    assert.equal((await approve(APPROVAL, env, host, token)).status, 404, host);
+  }
+});
+
+test("the service worker fetches what to say, and always ends in a notification", async () => {
+  const sw = await (await get("desk.bounded.tools", "/sw.js")).text();
+  assert.match(sw, /fetch\("\/pending"/);
+  // Every branch must reach showNotification: iOS revokes permission from an app
+  // that receives a push and shows nothing.
+  const branches = sw.slice(sw.indexOf('addEventListener("push"'), sw.indexOf('addEventListener("notificationclick"'));
+  // Comments stripped first. The handler EXPLAINS that every branch must end in
+  // showNotification, so counting the raw text counts the explanation — the same
+  // trap the opt-in's honesty test records, and one this test fell into.
+  const code = branches.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  assert.equal((code.match(/showNotification/g) || []).length, 1, "one call, reached from every path");
+  assert.match(code, /catch/, "a failed fetch still notifies");
+});
+
+test("an off-origin approval link opens rather than focusing a desk tab", async () => {
+  // Focusing an existing window would drop the reader somewhere other than the
+  // tap promised — the keeper is a different origin.
+  const sw = await (await get("desk.bounded.tools", "/sw.js")).text();
+  assert.match(sw, /offOrigin/);
 });

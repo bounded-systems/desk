@@ -38,8 +38,20 @@ export const NOTIFY_AUDIENCE = "https://desk.bounded.tools";
  * reviewed commit, which is the whole thing `doors.json` being a committed file
  * is for.
  */
-export const NOTIFY_WORKFLOW_REF =
-  "bounded-systems/.github-private/.github/workflows/front-desk-projection.yml@refs/heads/main";
+export const NOTIFY_WORKFLOW_REFS = [
+  // The board projection — fans out "the board changed".
+  "bounded-systems/.github-private/.github/workflows/front-desk-projection.yml@refs/heads/main",
+  // The lane that opens desk's own Face ID ceremony, so an approval request can
+  // reach a phone (#51). A SET rather than a second constant because an
+  // approval notice comes from whichever lane opened the ceremony, and
+  // infra#526's rule holds either way: a workflowRef pins ONE workflow, so each
+  // caller is its own entry here. Adding one is a reviewed commit, which is the
+  // whole point of it not being a var.
+  "bounded-systems/desk/.github/workflows/deploy.yml@refs/heads/main",
+];
+
+/** Kept for callers that want the projection specifically. */
+export const NOTIFY_WORKFLOW_REF = NOTIFY_WORKFLOW_REFS[0];
 
 const parseJson = (seg) => JSON.parse(new TextDecoder().decode(unb64url(seg)));
 
@@ -100,6 +112,6 @@ export async function verifyJwt(jwt, audience, { getJwks = fetchGitHubJwks, nowM
  */
 export async function verifyNotifyCaller(jwt, opts = {}) {
   const claims = await verifyJwt(jwt, NOTIFY_AUDIENCE, opts);
-  if (claims.job_workflow_ref !== NOTIFY_WORKFLOW_REF) throw new Error("workflow not allowed");
+  if (!NOTIFY_WORKFLOW_REFS.includes(claims.job_workflow_ref)) throw new Error("workflow not allowed");
   return claims;
 }

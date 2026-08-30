@@ -49,6 +49,8 @@ import { validateSubscription, putSubscription } from "./subscriptions.js";
 import { notifyAll } from "./notify.js";
 import { importVapidKey } from "./push.js";
 import { verifyNotifyCaller } from "./oidc.js";
+import { ICONS, iconBytes } from "./icons.js";
+import { validateApproval, putApproval, pending } from "./pending.js";
 
 // ── The installable app (#766) ───────────────────────────────────────────────
 //
@@ -69,7 +71,17 @@ const MANIFEST = {
   // visible as a flash of the wrong colour on launch.
   background_color: "#fbfaf8",
   theme_color: "#0C5A42",
-  icons: [],
+  // The bounded.tools mark (#51). Empty until now, which is why iOS showed the
+  // app as a grey letter "D" — the first character of the name, its fallback
+  // when a manifest offers nothing.
+  //
+  // "any maskable" on both: the icons bleed to the edge, so a launcher may mask
+  // them to any shape without clipping the glyph. Declaring only "any" makes
+  // Android draw a white plate behind them instead.
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+  ],
 };
 
 // THE SERVICE WORKER, deliberately minimal and deliberately NOT a cache.
@@ -88,26 +100,49 @@ self.addEventListener("install", (e) => { self.skipWaiting(); });
 self.addEventListener("activate", (e) => { e.waitUntil(self.clients.claim()); });
 
 self.addEventListener("push", (event) => {
-  // A push with no body, or a body that is not the JSON we send, must still
-  // notify: a silent push is indistinguishable from a broken one, and iOS may
-  // revoke permission from an app that receives pushes and shows nothing.
-  let data = {};
-  try { data = event.data ? event.data.json() : {}; } catch (_) { data = {}; }
-  const title = data.title || "Front Desk";
-  const body = data.body || "The board changed.";
-  event.waitUntil(self.registration.showNotification(title, {
-    body,
-    tag: data.tag || "front-desk",
-    data: { url: data.url || "/" },
-  }));
+  // WE SEND NO PAYLOAD, so what this notification is ABOUT is fetched from the
+  // origin on wake (#51). Before that it rendered two constants and every push
+  // said "The board changed." — true for a board change and wrong for an
+  // approval, which is the message most worth sending.
+  //
+  // A push with no body, or one we cannot describe, must STILL notify: a silent
+  // push is indistinguishable from a broken one, and iOS revokes permission from
+  // an app that receives pushes and shows nothing. So every branch here ends in
+  // showNotification.
+  event.waitUntil((async () => {
+    let d = { title: "Front Desk", body: "The board changed.", url: "/" };
+    try {
+      const res = await fetch("/pending", { cache: "no-store" });
+      if (res.ok) {
+        const j = await res.json();
+        if (j && j.title && j.body) d = { title: j.title, body: j.body, url: j.url || "/" };
+      }
+    } catch (_) {
+      // Offline, or the origin is down. Fall through to the default rather than
+      // showing nothing.
+    }
+    await self.registration.showNotification(d.title, {
+      body: d.body,
+      // One tag, so a second push replaces the first rather than stacking. What
+      // a reader wants is the current state, not a history.
+      tag: "front-desk",
+      data: { url: d.url },
+    });
+  })());
 });
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const target = (event.notification.data && event.notification.data.url) || "/";
   event.waitUntil((async () => {
-    const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-    for (const c of all) { if ("focus" in c) return c.focus(); }
+    // An approval points at the keeper, which is a DIFFERENT origin — focusing an
+    // existing desk window would silently drop the reader somewhere else than
+    // the tap promised. So an off-origin target always opens.
+    const offOrigin = /^https:\/\//.test(target) && !target.startsWith(self.location.origin);
+    if (!offOrigin) {
+      const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const c of all) { if ("focus" in c) return c.focus(); }
+    }
     if (self.clients.openWindow) return self.clients.openWindow(target);
   })());
 });
@@ -456,6 +491,52 @@ export async function handleNotify(request, env) {
   });
 }
 
+
+/**
+ * Record an approval request and fan it out (#51).
+ *
+ * Same OIDC door as /notify — the caller is a pinned workflow, not a secret —
+ * and deliberately the same fan-out, so an approval reaches exactly the devices
+ * a board change would. What differs is only that /pending now has something to
+ * say when the worker wakes.
+ */
+export async function handleApproval(request, env) {
+  const no = (status, error) =>
+    new Response(JSON.stringify({ error }) + "\n", {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    });
+
+  if (!env.SUBSCRIPTIONS) return no(503, "no subscription store is configured on this deployment");
+
+  const auth = request.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return no(401, "an Actions OIDC bearer token is required");
+  try {
+    await verifyNotifyCaller(token);
+  } catch (e) {
+    return no(403, `caller not authorized: ${e.message}`);
+  }
+
+  const body = await request.text();
+  if (body.length > 4096) return no(413, "approval too large");
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return no(400, "body is not JSON");
+  }
+  const checked = validateApproval(parsed);
+  if (!checked.ok) return no(400, checked.error);
+
+  // RECORD BEFORE SENDING. A push whose /pending is still empty renders the
+  // board default — the reader is told the board changed when what actually
+  // happened is that someone needs a Face ID.
+  await putApproval(env.SUBSCRIPTIONS, checked.value);
+
+  return await handleNotify(request, env);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -475,6 +556,14 @@ export default {
         return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
       }
       return await handleSubscribe(request, env);
+    }
+
+    // Record an approval request, then fan out (#51). Same door as /notify.
+    if (url.pathname === "/approval" && request.method === "POST") {
+      if (surfaceFor(url.hostname, env) !== "overview") {
+        return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
+      }
+      return await handleApproval(request, env);
     }
 
     // The fan-out trigger (#37). Same surface rule, same reason.
@@ -530,6 +619,25 @@ export default {
           },
         });
       }
+      // The icons (#51). desk has no static-assets pipeline, so they are served
+      // from the bundle. Immutable for a year: the bytes only change when the
+      // mark does, and a stale icon on a Home Screen is very hard to clear.
+      const icon = url.pathname.match(/^\/icon-(180|192|512)\.png$/);
+      if (icon) {
+        return new Response(iconBytes(ICONS[icon[1]]), {
+          headers: {
+            "content-type": "image/png",
+            "cache-control": "public, max-age=31536000, immutable",
+            "x-content-type-options": "nosniff",
+          },
+        });
+      }
+      // What the service worker fetches on wake (#51). Public and no-store: it
+      // carries only what a notification will display, and the notification is
+      // already going to every subscribed device. NOT the store, NOT the keys.
+      if (url.pathname === "/pending") {
+        return json(await pending(env.SUBSCRIPTIONS), 200, 0);
+      }
       if (url.pathname === "/sw.js") {
         return new Response(SERVICE_WORKER, {
           headers: {
@@ -548,6 +656,21 @@ export default {
           },
         });
       }
+    }
+
+    // THE APP-SHELL PATHS 404 ON THE STATIC HOSTS (#51). desk got this right in
+    // #766; the other three never did, and every path on them still falls
+    // through to the board — so /manifest.webmanifest, /sw.js and now
+    // /icon-192.png each answer 200 with text/html. That is the failure #766's
+    // own comment names: "a 200 that returns the wrong content type is worse
+    // than a 404 — a check that only looks at the status reads the asset as
+    // present". A browser asked to install from issues.bounded.tools would parse
+    // a page as a manifest.
+    if (/^\/(manifest\.webmanifest|sw\.js|notify\.js|icon-(180|192|512)\.png)$/.test(url.pathname)) {
+      return new Response("not found\n", {
+        status: 404,
+        headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+      });
     }
 
     const wantsJson = url.pathname === "/board.json";
