@@ -29,10 +29,19 @@ name: deploy
 on:
   workflow_dispatch:
     inputs:
+      provision:
+        description: >-
+          ONE-SHOT: create the SUBSCRIPTIONS namespace and mint the VAPID keypair before
+          deploying (#42). Leave off for an ordinary deploy. Re-running with a keypair
+          already configured is refused — a new public key silently invalidates every
+          stored subscription.
+        type: boolean
+        default: false
 
 permissions:
   id-token: write # OIDC → broker /deploy/desk
-  contents: read
+  contents: write # provisioning pushes the branch that syncs wrangler.jsonc (#42)
+  pull-requests: write # ...and opens the PR for it
   issues: write # the manual-approval composite opens/updates the approval issue
 
 # One deploy at a time; never cancel one already in flight.
@@ -188,6 +197,115 @@ jobs:
           echo "✓ minted Workers:Edit token for deploy=desk"
           echo "token=$tok" >> "$GITHUB_OUTPUT"
 
+      # ── PROVISIONING (#42), before the deploy and only when asked ───────────
+      #
+      # WHY HERE AND NOT IN ITS OWN LANE. It was its own lane (#40) and could
+      # not mint: the desk WORKERS_DEPLOY entry pins ONE workflowRef, and it
+      # names deploy.yml. That is infra#526's finding — "a workflowRef pins ONE
+      # workflow, so each caller needs its own entry" — and the fix is either a
+      # second broker entry (an infra PR, a broker deploy, then three more
+      # approved runs) or this. Ceremonies are the scarce resource: four lapsed
+      # unapproved on 2026-08-30 because each needs a human inside a 15-minute
+      # window, so a shape that spends four where one will do is the worse
+      # shape however tidy the separation looks.
+      #
+      # THE COST, STATED: the deployed Worker's config LEADS the repo until the
+      # sync PR below merges. #40 avoided that by deploying only after the
+      # wiring landed. Traded deliberately — the window is minutes and the same
+      # run opens the PR — but it is a trade, and it belongs here rather than in
+      # a commit message nobody re-reads.
+      - name: Refuse to re-provision over a live keypair
+        if: ${{ inputs.provision }}
+        run: |
+          set -euo pipefail
+          # Comments stripped first: wrangler.jsonc DOCUMENTS this key, so a raw
+          # grep matches its own documentation and refuses a run that should go.
+          if grep -v '^[[:space:]]*//' wrangler.jsonc | grep -q '"VAPID_PUBLIC_KEY"'; then
+            echo "::error::a VAPID keypair is already configured. A new public key silently"
+            echo "::error::  invalidates every stored subscription — a browser binds each one to"
+            echo "::error::  the key it was created with, and there is no two-slot overlap here."
+            exit 1
+          fi
+
+      - name: Create the SUBSCRIPTIONS namespace (or find it)
+        id: kv
+        if: ${{ inputs.provision }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.token.outputs.token }}
+          TITLE: bounded-desk-SUBSCRIPTIONS
+        run: |
+          set -euo pipefail
+          # IDEMPOTENT BY LOOKUP. A partial earlier run may already have created
+          # it, and a SECOND namespace would bind the Worker to an empty store
+          # while the real subscriptions sat in the orphan — a failure that reads
+          # downstream as "nobody has subscribed".
+          find_id() {
+            npx --yes wrangler@4 kv namespace list 2>/dev/null \
+              | jq -r --arg t "$TITLE" '.[] | select(.title==$t) | .id' | head -1
+          }
+          id="$(find_id || true)"
+          if [ -n "$id" ]; then
+            echo "namespace already exists — reusing $id"
+          else
+            npx --yes wrangler@4 kv namespace create SUBSCRIPTIONS
+            id="$(find_id || true)"
+          fi
+          [ -n "$id" ] || { echo "::error::could not create or find $TITLE"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "✓ namespace $id"
+
+      # The private half exists only between these lines: generated here, masked
+      # immediately, piped to `secret put`, never written to a file and never
+      # echoed. The public half is not a secret — it is served to every visitor
+      # inside /notify.js — so it is printed deliberately.
+      - name: Generate the VAPID keypair and store the private half
+        id: vapid
+        if: ${{ inputs.provision }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          keys="$(node -e '
+            (async () => {
+              const kp = await crypto.subtle.generateKey({name:"ECDSA",namedCurve:"P-256"}, true, ["sign"]);
+              const raw = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+              const jwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+              process.stdout.write(JSON.stringify({pub: Buffer.from(raw).toString("base64url"), priv: jwk.d}));
+            })();
+          ')"
+          priv="$(jq -r .priv <<<"$keys")"
+          echo "::add-mask::$priv"
+          pub="$(jq -r .pub <<<"$keys")"
+
+          # Shape-check BEFORE storing. A malformed pair fails later as an opaque
+          # 401 from every push service at once — indistinguishable from a dead
+          # subscription list — so it is caught here, where it is legible.
+          node -e '
+            const b = s => Buffer.from(s, "base64url");
+            const pub = b(process.argv[1]), priv = b(process.argv[2]);
+            if (pub.length !== 65 || pub[0] !== 4) throw new Error("public key is not a 65-byte uncompressed P-256 point");
+            if (priv.length !== 32) throw new Error("private key is not a 32-byte scalar");
+          ' "$pub" "$priv"
+
+          printf '%s' "$priv" | npx --yes wrangler@4 secret put VAPID_PRIVATE_KEY
+          echo "pub=$pub" >> "$GITHUB_OUTPUT"
+          echo "✓ private half stored as the Worker secret VAPID_PRIVATE_KEY (never printed)"
+          echo "public half: $pub"
+
+      - name: Wire the bindings into wrangler.jsonc, so THIS deploy carries them
+        if: ${{ inputs.provision }}
+        env:
+          KV_ID: ${{ steps.kv.outputs.id }}
+          VAPID_PUBLIC: ${{ steps.vapid.outputs.pub }}
+          VAPID_SUBJECT: ${{ vars.VAPID_SUBJECT || 'mailto:desk@bounded.tools' }}
+        run: |
+          set -euo pipefail
+          # The transform lives in scripts/, under test — front-desk-projection's
+          # rule: one embedded in YAML is one nobody can run, and this decides
+          # which store the Worker binds to.
+          node scripts/wire-provisioned.mjs wrangler.jsonc
+          node --test test/*.test.mjs
+
       - name: wrangler deploy
         id: deploy
         env:
@@ -238,3 +356,26 @@ jobs:
           probe issues '<h1>Issues</h1>'
           probe claims '<h1>Claims</h1>'
           probe prs    '<h1>PRs</h1>'
+
+      # A job cannot finish this job: the namespace id and the public key are not
+      # secrets but must land in a COMMITTED file. This PR is what closes the gap
+      # the block comment above admits — the deployed Worker leads the repo until
+      # it merges, so it is opened by the same run rather than left to a human to
+      # remember.
+      - name: Open the PR syncing the repo to what was deployed
+        if: ${{ inputs.provision }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KV_ID: ${{ steps.kv.outputs.id }}
+        run: |
+          set -euo pipefail
+          branch="provision/vapid-$(date -u +%Y%m%d%H%M%S)"
+          git config user.name "desk-deploy"
+          git config user.email "desk-deploy@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add wrangler.jsonc
+          git commit -m "$(printf 'desk: wire the subscription store and the VAPID public key (#42)\n\nProvisioned by .github/workflows/deploy.yml run %s, which deployed with these\nvalues already applied — this commit brings the repo up to what is live.\n\nThe private half was generated inside that run, masked, and written straight to\nthe Worker secret VAPID_PRIVATE_KEY. It was never printed and no human has seen\nit.\n\nClaim-issue: bounded-systems/desk#42' "$GITHUB_RUN_ID")"
+          git push -u origin "$branch"
+          gh pr create --draft --base main --head "$branch" \
+            --title "desk: wire the subscription store and the VAPID public key" \
+            --body "$(printf 'Opened by `deploy.yml` run %s, which **already deployed** with these values applied.\n\n- KV namespace `%s` bound as `SUBSCRIPTIONS`\n- `VAPID_PUBLIC_KEY` set (the public half — served to every visitor inside `/notify.js`)\n- `VAPID_SUBJECT` set\n\nThe private half was generated inside that run, masked, and written straight to the Worker secret `VAPID_PRIVATE_KEY`. It was never printed and no human has seen it.\n\n**Until this merges the deployed Worker leads the repo.** That is the trade #42 records: folding provisioning into the pinned lane costs three fewer passkey ceremonies and buys this short window of drift.\n\n**Check `VAPID_SUBJECT`** — it is the contact a push service uses if we misbehave.\n\n**Changing `VAPID_PUBLIC_KEY` later invalidates every stored subscription.**\n\nClaim-issue: bounded-systems/desk#42' "$GITHUB_RUN_ID" "$KV_ID")"
