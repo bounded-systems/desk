@@ -44,6 +44,29 @@ afterEach(() => { globalThis.fetch = realFetch; });
 const get = (host, path = "/", env = ENV) =>
   worker.fetch(new Request(`https://${host}${path}`), env);
 
+/** Not a real key — nothing in the browser half validates it, only substitutes it. */
+const TEST_VAPID_PUBLIC = "BExampleTestPublicKeyValue";
+/** A KV stand-in, per test, so one test's subscriptions never reach another's. */
+const kvStub = () => {
+  const map = new Map();
+  return { map, put: async (k, v) => void map.set(k, v), get: async (k) => map.get(k) ?? null,
+           delete: async (k) => void map.delete(k),
+           list: async () => ({ keys: [...map.keys()].map((name) => ({ name })), list_complete: true }) };
+};
+const KEYED_ENV = { ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC, SUBSCRIPTIONS: kvStub() };
+
+const post = (host, path, body, env) =>
+  worker.fetch(new Request(`https://${host}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  }), env);
+
+const SUBSCRIPTION = {
+  endpoint: "https://fcm.googleapis.com/fcm/send/a-device",
+  keys: { p256dh: "BPublic", auth: "authsecret" },
+};
+
 test("each host serves its own question", async () => {
   for (const [host, marker] of [
     ["issues.bounded.tools", /<h1>Issues<\/h1>/],
@@ -279,25 +302,50 @@ test("every unavailable path ends in a sentence, not silence", async () => {
 });
 
 test("the button is only offered when pressing it can do something", async () => {
-  const js = await (await get("desk.bounded.tools", "/notify.js")).text();
+  const js = await (await get("desk.bounded.tools", "/notify.js", KEYED_ENV)).text();
   // `denied` is not re-promptable — offering the button there would offer a
   // no-op — so that branch must pass `false` for the button.
   assert.match(js, /permission === "denied"[\s\S]{0,200}show\([^)]*false\)/);
-  assert.match(js, /permission === "granted"[\s\S]{0,300}show\([^)]*false\)/);
+  assert.match(js, /permission === "granted"[\s\S]{0,800}show\([^)]*false\)/);
 });
 
-test("it does NOT claim delivery works, because it does not yet", async () => {
-  // The sender does not exist. Saying "you're all set" would be exactly the
-  // false-green this board keeps finding elsewhere — an inert path reading as
-  // wired (#779), a summary reporting health it never measured (#809).
+test("with no keypair configured it says so, and offers no button (#37)", async () => {
+  // The banner this replaces said "the sender is still being built". The sender
+  // now exists, so that sentence would itself be the false statement — but a
+  // deploy with no VAPID key still cannot subscribe anyone, and saying nothing
+  // about it would be the same false-green one layer down: an inert path
+  // reading as wired (#779), a summary reporting health it never measured
+  // (#809).
   const js = await (await get("desk.bounded.tools", "/notify.js")).text();
-  assert.match(js, /Delivery is not switched on yet/);
-  // Comments stripped first: the script EXPLAINS why it must not say "you're
-  // all set", so a check over the whole file fires on its own documentation —
-  // and deleting the explanation would be the cheapest route to green. Same
-  // trap _workflow-lint.yml records for shellcheck directives in prose.
+  assert.match(js, /var VAPID_PUBLIC_KEY = "";/);
+  assert.match(js, /no signing key is configured/);
+
+  // Comments stripped first: the script EXPLAINS why it must not overclaim, so
+  // a check over the whole file would fire on its own documentation — and
+  // deleting the explanation would be the cheapest route to green. Same trap
+  // _workflow-lint.yml records for shellcheck directives in prose.
   const code = js.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
   assert.ok(!/you'?re all set/i.test(code));
+});
+
+test("with a keypair it actually subscribes rather than only registering", async () => {
+  const js = await (await get("desk.bounded.tools", "/notify.js", KEYED_ENV)).text();
+  assert.match(js, new RegExp(`var VAPID_PUBLIC_KEY = "${TEST_VAPID_PUBLIC}";`));
+  assert.match(js, /pushManager\.subscribe\(/);
+  assert.match(js, /userVisibleOnly: true/);
+  assert.match(js, /fetch\("\/subscribe"/);
+  // The old banner promised nothing would arrive. Keeping it once the sender
+  // exists would be a lie in the other direction.
+  assert.ok(!/Delivery is not switched on yet/.test(js));
+});
+
+test("an already-permitted device still subscribes — permission is not a subscription", async () => {
+  // The case this exists for: a device that granted permission BEFORE the
+  // sender shipped has permission and no subscription, and would otherwise
+  // read "enabled" forever while receiving nothing.
+  const js = await (await get("desk.bounded.tools", "/notify.js", KEYED_ENV)).text();
+  const granted = js.slice(js.indexOf('permission === "granted"'), js.indexOf('permission === "denied"'));
+  assert.match(granted, /subscribeAndStore/);
 });
 
 test("the opt-in block is rendered on desk and on no other host", async () => {
@@ -314,4 +362,69 @@ test("the opt-in block is rendered on desk and on no other host", async () => {
 test("the block ships hidden — a dead control must not appear without script", async () => {
   const deskHtml = await (await get("desk.bounded.tools")).text();
   assert.match(deskHtml, /<section class="notify" id="notify" hidden>/);
+});
+
+// ── /subscribe, the one write this Worker accepts (#37) ──────────────────────
+
+test("a valid subscription is stored", async () => {
+  const env = { ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC, SUBSCRIPTIONS: kvStub() };
+  const res = await post("desk.bounded.tools", "/subscribe", SUBSCRIPTION, env);
+  assert.equal(res.status, 201);
+  assert.equal(env.SUBSCRIPTIONS.map.size, 1);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+});
+
+test("the same device posting twice stays one record", async () => {
+  const env = { ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC, SUBSCRIPTIONS: kvStub() };
+  await post("desk.bounded.tools", "/subscribe", SUBSCRIPTION, env);
+  await post("desk.bounded.tools", "/subscribe", SUBSCRIPTION, env);
+  assert.equal(env.SUBSCRIPTIONS.map.size, 1);
+});
+
+test("a missing store is a 503 naming the Worker's own gap, not a 4xx blaming the device", async () => {
+  const res = await post("desk.bounded.tools", "/subscribe", SUBSCRIPTION, { ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC });
+  assert.equal(res.status, 503);
+  assert.match((await res.json()).error, /subscription store/);
+});
+
+test("a missing key is also a 503 — subscribing against no key stores a dead record", async () => {
+  const res = await post("desk.bounded.tools", "/subscribe", SUBSCRIPTION, { ...ENV, SUBSCRIPTIONS: kvStub() });
+  assert.equal(res.status, 503);
+  assert.match((await res.json()).error, /signing key/);
+});
+
+test("every refusal names what is wrong, because our own script is the caller", async () => {
+  const env = () => ({ ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC, SUBSCRIPTIONS: kvStub() });
+  for (const [body, pattern] of [
+    ["{not json", /not JSON/],
+    [{ keys: { p256dh: "a", auth: "b" } }, /endpoint/],
+    [{ endpoint: "https://p.example/x" }, /keys/],
+    [{ ...SUBSCRIPTION, endpoint: "http://attacker.example/x" }, /https/],
+  ]) {
+    const res = await post("desk.bounded.tools", "/subscribe", body, env());
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, pattern);
+  }
+});
+
+test("an oversized body is refused before it is parsed", async () => {
+  const env = { ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC, SUBSCRIPTIONS: kvStub() };
+  const res = await post("desk.bounded.tools", "/subscribe", "x".repeat(5000), env);
+  assert.equal(res.status, 413);
+  assert.equal(env.SUBSCRIPTIONS.map.size, 0);
+});
+
+test("/subscribe exists on desk and nowhere else", async () => {
+  for (const host of STATIC_HOSTS) {
+    const env = { ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC, SUBSCRIPTIONS: kvStub() };
+    const res = await post(host, "/subscribe", SUBSCRIPTION, env);
+    assert.equal(res.status, 404, `${host} must not take subscriptions`);
+    assert.equal(env.SUBSCRIPTIONS.map.size, 0, `${host} must not have stored one`);
+  }
+});
+
+test("the method gate still holds for everything that is not /subscribe", async () => {
+  const res = await post("desk.bounded.tools", "/", SUBSCRIPTION, KEYED_ENV);
+  assert.equal(res.status, 405);
+  assert.equal(res.headers.get("allow"), "GET, HEAD");
 });
