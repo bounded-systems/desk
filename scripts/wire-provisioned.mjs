@@ -23,9 +23,17 @@ export function wire(source, { kvId, vapidPublic, vapidSubject }) {
   // REFUSE TO WIRE TWICE. JSON tolerates a duplicate key by taking the last, so
   // a second pass would produce a file that parses fine and carries a dead
   // kv_namespaces block above the live one — the kind of config that reads as
-  // correct until someone reads it. The workflow already guards this earlier;
-  // this is the half that cannot be dispatched around.
-  if (/^\s*"kv_namespaces"/m.test(source) || source.includes('"VAPID_PUBLIC_KEY"')) {
+  // correct until someone reads it. The workflow guards this earlier too; this
+  // is the half that cannot be dispatched around.
+  //
+  // COMMENTS ARE STRIPPED FIRST, and that is not a nicety: wrangler.jsonc
+  // DOCUMENTS these very keys in prose — the note explaining what provisioning
+  // will add spells out `"VAPID_PUBLIC_KEY": "…"` as an example. A guard reading
+  // the raw text sees its own documentation and refuses to wire a file that is
+  // not wired, which would have failed every real run while passing every test
+  // written against a file that lacked the note.
+  const code = lines.filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  if (/"kv_namespaces"/.test(code) || /"VAPID_PUBLIC_KEY"/.test(code)) {
     throw new Error("wrangler.jsonc is already wired — refusing to write a second binding");
   }
 

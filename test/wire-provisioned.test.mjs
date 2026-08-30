@@ -73,3 +73,26 @@ test("wiring an already-wired config is refused, not applied twice", () => {
   const once = wire(fs.readFileSync("wrangler.jsonc", "utf8"), ARGS);
   assert.throws(() => wire(once, ARGS), /already wired/);
 });
+
+test("a config that only MENTIONS the keys in prose is still wireable", () => {
+  // wrangler.jsonc documents these keys in the note describing what
+  // provisioning will add. A guard reading raw text sees its own documentation
+  // and refuses a file that is not wired — which would have failed every real
+  // run while passing every test written against a file without the note.
+  const source = `{
+  "name": "bounded-desk",
+
+  // ── NOT YET DECLARED: the subscription store and the VAPID keypair (#37) ──
+  //   1. wrangler kv namespace create SUBSCRIPTIONS
+  //      "kv_namespaces": [{ "binding": "SUBSCRIPTIONS", "id": "<the id>" }]
+  //   2. then the PUBLIC half as a var below:
+  //      "VAPID_PUBLIC_KEY": "<the 65-byte point, base64url>"
+
+  "vars": {
+    "DESK_LIMIT": "25"
+  }
+}`;
+  const cfg = parse(wire(source, ARGS));
+  assert.equal(cfg.vars.VAPID_PUBLIC_KEY, "BTestPublicKey");
+  assert.equal(cfg.kv_namespaces[0].id, "abc123");
+});

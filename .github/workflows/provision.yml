@@ -73,7 +73,10 @@ jobs:
           FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
-          if grep -q '"VAPID_PUBLIC_KEY"' wrangler.jsonc; then
+          # Comment lines stripped first: wrangler.jsonc DOCUMENTS this very key
+          # in the note describing what provisioning will add, so a raw grep
+          # matches its own documentation and refuses a run that should proceed.
+          if grep -v '^[[:space:]]*//' wrangler.jsonc | grep -q '"VAPID_PUBLIC_KEY"'; then
             if [ "$FORCE" != "true" ]; then
               echo "::error::a VAPID keypair is already configured in wrangler.jsonc."
               echo "::error::  Re-provisioning mints a NEW public key, and a browser binds each"
