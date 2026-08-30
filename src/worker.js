@@ -49,7 +49,7 @@ import { validateSubscription, putSubscription } from "./subscriptions.js";
 import { notifyAll } from "./notify.js";
 import { importVapidKey } from "./push.js";
 import { verifyNotifyCaller } from "./oidc.js";
-import { ICONS, iconBytes } from "./icons.js";
+import { AVATAR_SVG, ICON_PNGS, iconBytes } from "./icons.js";
 import { validateApproval, putApproval, pending } from "./pending.js";
 
 // ── The installable app (#766) ───────────────────────────────────────────────
@@ -78,9 +78,17 @@ const MANIFEST = {
   // "any maskable" on both: the icons bleed to the edge, so a launcher may mask
   // them to any shape without clipping the glyph. Declaring only "any" makes
   // Android draw a white plate behind them instead.
+  // The SVG FIRST: it is the icon of record and scales to whatever a launcher
+  // asks for, so there is no size to keep in sync with a file. The PNG is the
+  // fallback for anything that will not take vector — iOS above all, which reads
+  // apple-touch-icon rather than this list for the Home Screen.
+  //
+  // "any maskable" on both: the avatar bleeds to the edge, so a launcher may cut
+  // it to any shape without clipping the glyph. Declaring only "any" makes
+  // Android draw a white plate behind a full-bleed icon.
   icons: [
-    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
-    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+    { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any maskable" },
+    { src: "/icon-1024.png", sizes: "1024x1024", type: "image/png", purpose: "any maskable" },
   ],
 };
 
@@ -622,9 +630,18 @@ export default {
       // The icons (#51). desk has no static-assets pipeline, so they are served
       // from the bundle. Immutable for a year: the bytes only change when the
       // mark does, and a stale icon on a Home Screen is very hard to clear.
-      const icon = url.pathname.match(/^\/icon-(180|192|512)\.png$/);
+      if (url.pathname === "/icon.svg") {
+        return new Response(AVATAR_SVG, {
+          headers: {
+            "content-type": "image/svg+xml; charset=utf-8",
+            "cache-control": "public, max-age=31536000, immutable",
+            "x-content-type-options": "nosniff",
+          },
+        });
+      }
+      const icon = url.pathname.match(/^\/icon-(460|1024)\.png$/);
       if (icon) {
-        return new Response(iconBytes(ICONS[icon[1]]), {
+        return new Response(iconBytes(ICON_PNGS[icon[1]]), {
           headers: {
             "content-type": "image/png",
             "cache-control": "public, max-age=31536000, immutable",
@@ -666,7 +683,7 @@ export default {
     // than a 404 — a check that only looks at the status reads the asset as
     // present". A browser asked to install from issues.bounded.tools would parse
     // a page as a manifest.
-    if (/^\/(manifest\.webmanifest|sw\.js|notify\.js|icon-(180|192|512)\.png)$/.test(url.pathname)) {
+    if (/^\/(manifest\.webmanifest|sw\.js|notify\.js|icon\.svg|icon-(460|1024)\.png)$/.test(url.pathname)) {
       return new Response("not found\n", {
         status: 404,
         headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
