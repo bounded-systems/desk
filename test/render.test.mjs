@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   renderIssues, renderClaims, renderPrs, renderOverview, renderUnavailable,
 } from "../src/render.js";
+import { selectPrs } from "../src/select.js";
 
 const board = (o = {}) => ({
   generated_at: "2026-08-25T12:00:00Z", limit: 25,
@@ -354,4 +355,66 @@ test("an empty section offers no 'all of them' line — there is nothing to offe
   assert.doesNotMatch(html, /All of them, in full/);
   assert.doesNotMatch(html, /Showing the first/);
   assert.match(html, /No open pull requests/);
+});
+
+// ── `unknown` must reach the summary (#809) ──────────────────────────────────
+//
+// The two problem tiles count only states the projection MEASURED, so a row it
+// could not measure fell out of the summary entirely. On 2026-08-30 the live
+// page read `6 open · 0 no live claim · 0 not gated` while all six PRs were
+// blocked on exactly `no live claim` — the enrichment reads check-runs in each
+// PR's own repo, which the projection's repo-scoped token cannot reach, so every
+// cross-repo row degrades to `unknown` and both problem tiles are structurally
+// zero.
+//
+// Per-row honesty was intact; the SUMMARY is what lied, and it is what a reader
+// looks at first.
+// Reads a tile's number by its LABEL, from the exact markup `tile()` emits.
+// The first version of these tests asserted `/3/.test(out)` — which matches any
+// "3" anywhere on the page, including a PR number — and so passed against the
+// unfixed renderer. A test that passes before the fix is not evidence.
+const tileFor = (out, label) => {
+  const re = new RegExp(
+    `<div class="tile"><div class="tile__n">(\\d+)</div><div class="tile__l">${label}</div></div>`,
+  );
+  const m = re.exec(out);
+  return m ? Number(m[1]) : null;
+};
+
+test("an all-unknown PR board does not render as a clean one", () => {
+  const feed = {
+    // The feed NAME is validated by selectPrs — a guard that caught this very
+    // fixture. Only the PR feed may render on this page.
+    feed: "front-desk-prs-public",
+    generated_at: new Date().toISOString(),
+    items: [1, 2, 3].map((n) => ({
+      repo: "bounded-systems/prx", number: n, title: `t${n}`, url: `https://e/${n}`,
+      labels: [], claim_check: { state: "unknown", conclusion: null, url: null },
+    })),
+  };
+  const out = renderPrs(selectPrs(feed), Date.now(), 60);
+
+  // The failure this replaces: `3 open · 0 no live claim · 0 not gated`, with
+  // nothing saying the rows were never measured.
+  assert.equal(tileFor(out, "unknown"), 3, "the unmeasured rows must be counted in the summary");
+  assert.equal(tileFor(out, "open"), 3);
+  // And not folded into a problem tile — `unknown` and `no live claim` are
+  // different answers and only one of them is a PR to fix.
+  assert.equal(tileFor(out, "no live claim"), 0);
+  assert.equal(tileFor(out, "not gated"), 0);
+});
+
+test("`0 unknown` is shown too — silence and 'not checked' look identical", () => {
+  const feed = {
+    feed: "front-desk-prs-public",
+    generated_at: new Date().toISOString(),
+    items: [{
+      repo: "bounded-systems/prx", number: 1, title: "t", url: "https://e/1",
+      labels: [], claim_check: { state: "compliant", conclusion: "success", url: "https://e/c" },
+    }],
+  };
+  const out = renderPrs(selectPrs(feed), Date.now(), 60);
+  // Rendered AT ZERO on purpose: `0 unknown` is positive evidence the rows were
+  // measured, and an absent tile is indistinguishable from "not checked".
+  assert.equal(tileFor(out, "unknown"), 0);
 });
