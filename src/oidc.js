@@ -48,6 +48,28 @@ export const NOTIFY_WORKFLOW_REFS = [
   // caller is its own entry here. Adding one is a reviewed commit, which is the
   // whole point of it not being a var.
   "bounded-systems/desk/.github/workflows/deploy.yml@refs/heads/main",
+  // infra's seven ceremony lanes, which now send their own approval notices.
+  //
+  // SEVEN ENTRIES FOR WHAT IS ONE CHANGE UPSTREAM, and that is infra#526 doing its
+  // job rather than a redundancy worth collapsing. `job_workflow_ref` names a
+  // FILE at a REF; there is no wildcard, no repository-level form, and nothing
+  // shorter that would admit these two without also admitting every other
+  // workflow in infra — a repo with deploy lanes that hold real credentials. The
+  // list gets longer as callers are added. That is the cost of the pin being
+  // exact, and it is the cheaper side of the trade: a list that grows by a
+  // reviewed line is visible, where a pattern that stops growing is a grant
+  // nobody re-reads.
+  //
+  // Each is pinned to `refs/heads/main` for the same reason as the two above: a
+  // branch or a fork mints a token with a different ref, so opening a PR against
+  // infra cannot reach this endpoint.
+  "bounded-systems/infra/.github/workflows/boot-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/broker-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/create-app.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/keeper-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/pathbase-door-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/repo-admin-apply.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/rotate-lease-key.yml@refs/heads/main",
 ];
 
 /** Kept for callers that want the projection specifically. */
