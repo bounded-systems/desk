@@ -19,6 +19,8 @@
 // made when PRs left the desk: the count does not vanish, it moves to the host
 // that owns it, and a footer line says where.
 
+import { LIGHT, DARK, vars } from "./palette.js";
+
 // TWO BANDS, BECAUSE ONE THRESHOLD CANNOT SAY BOTH THINGS.
 //
 // The single 24h threshold was set against the lane's DECLARED cadence — "the
@@ -125,10 +127,16 @@ const row = (marker, title, url, where) =>
         </div>
       </div>`;
 
+// THE COLOURS ARE NO LONGER TYPED HERE. Six of the light eight are brand tokens
+// now (src/tokens.js, generated from @bounded-systems/brand); the other two and
+// the whole dark scheme have nothing to pin to, and src/palette.js says which
+// and why for each. Both schemes go through one writer so a role cannot be added
+// to one block and forgotten in the other — the two lines used to be independent
+// prose, and nothing checked that they declared the same set.
 const STYLE = `
-    :root { --bg:#fbfaf8; --fg:#16201c; --muted:#5c6b64; --line:#e2e0da; --card:#fff; --accent:#0C5A42; --warn:#8a4b12; --warnbg:#fdf3e7; }
+    :root { ${vars(LIGHT)} }
     @media (prefers-color-scheme: dark) {
-      :root { --bg:#0e1512; --fg:#e8ece9; --muted:#93a49c; --line:#243029; --card:#141c18; --accent:#4fbf95; --warn:#f0b26b; --warnbg:#2a1e10; }
+      :root { ${vars(DARK)} }
     }
     * { box-sizing: border-box; }
     body { margin:0; background:var(--bg); color:var(--fg);
@@ -243,8 +251,8 @@ function page(title, description, body, headExtra = "") {
        page should match the PAGE, not the brand. The manifest's splash colour
        has no such option — one value serves both launches, which is why it is
        the brand green rather than either page background. -->
-  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fbfaf8">
-  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e1512">${headExtra}
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="${LIGHT.bg}">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="${DARK.bg}">${headExtra}
   <style>${STYLE}</style>
 </head>
 <body>

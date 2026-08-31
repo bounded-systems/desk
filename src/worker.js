@@ -51,6 +51,7 @@ import { notifyAll } from "./notify.js";
 import { importVapidKey } from "./push.js";
 import { verifyNotifyCaller } from "./oidc.js";
 import { AVATAR_SVG, ICON_PNGS, iconBytes } from "./icons.js";
+import { FOREST } from "./tokens.js";
 import { validateApproval, putApproval, pending } from "./pending.js";
 
 // ── The installable app (#766) ───────────────────────────────────────────────
@@ -82,8 +83,14 @@ const MANIFEST = {
   // the dark page painted. The green matches the icon plate and theme_color, so
   // the launch reads as the app opening rather than as a page loading, and it is
   // wrong in neither scheme instead of right in one.
-  background_color: "#0C5A42",
-  theme_color: "#0C5A42",
+  // FOREST, not a literal: this is the same value the icon plate carries and the
+  // same one icons.test.mjs pins the avatar to, so it has to come from the same
+  // place the avatar's bytes do (src/tokens.js, generated from the brand
+  // package). It was the ONE colour desk had already transcribed correctly —
+  // which is the argument for the change rather than against it, since nothing
+  // said so and nothing would have noticed the day it stopped being true.
+  background_color: FOREST,
+  theme_color: FOREST,
   // The bounded.tools mark (#51). Empty until now, which is why iOS showed the
   // app as a grey letter "D" — the first character of the name, its fallback
   // when a manifest offers nothing.

@@ -9,7 +9,8 @@
     "test": "node --test test/*.test.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "icons": "node scripts/make-icons.mjs"
+    "icons": "node scripts/make-icons.mjs",
+    "tokens": "node scripts/make-tokens.mjs"
   },
   "devDependencies": {
     "wrangler": "^4",
