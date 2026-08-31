@@ -7,12 +7,15 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
+    "test:layout": "node --test test/layout/*.test.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "icons": "node scripts/make-icons.mjs"
+    "icons": "node scripts/make-icons.mjs",
+    "tokens": "node scripts/make-tokens.mjs"
   },
   "devDependencies": {
-    "wrangler": "^4",
-    "@bounded-systems/brand": "^2.0.0"
+    "@bounded-systems/brand": "^2.0.0",
+    "playwright": "1.62.1",
+    "wrangler": "^4"
   }
 }

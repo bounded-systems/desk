@@ -48,6 +48,44 @@ export const NOTIFY_WORKFLOW_REFS = [
   // caller is its own entry here. Adding one is a reviewed commit, which is the
   // whole point of it not being a var.
   "bounded-systems/desk/.github/workflows/deploy.yml@refs/heads/main",
+  // infra's seven ceremony lanes, which now send their own approval notices.
+  //
+  // SEVEN ENTRIES FOR WHAT IS ONE CHANGE UPSTREAM, and that is infra#526 doing its
+  // job rather than a redundancy worth collapsing. `job_workflow_ref` names a
+  // FILE at a REF; there is no wildcard and no repository-level form, so the
+  // only shorter spelling is one that matches on the repo — and infra carries
+  // thirty workflows. Twenty-three of them are not on this list, nine of those
+  // already request `id-token: write`, and any of the rest is one line away from
+  // it: a repo-level grant would hand the fan-out to every lane in a repo that
+  // applies Cloudflare state, not to seven reviewed ones. The list gets longer
+  // as callers are added.
+  // That is the cost of the pin being exact, and it is the cheaper side of the
+  // trade: a list that grows by a reviewed line is visible, where a pattern that
+  // stops growing is a grant nobody re-reads.
+  //
+  // Each is pinned to `refs/heads/main` for the same reason as the two above: a
+  // branch or a fork mints a token with a different ref, so opening a PR against
+  // infra cannot reach this endpoint.
+  // The announce lane (.github#305). NOT a ceremony lane — it opens nothing and
+  // approves nothing. It exists because a SESSION cannot reach this endpoint: a
+  // session holds no Actions OIDC token, so `claim-ceremony.mjs` had no way to
+  // tell a phone that the ceremony it just opened is waiting. Every claim
+  // ceremony asks for a tap; none of them could ring. This lane is the one that
+  // rings for them.
+  //
+  // Its inputs come from a session, which is the thing to look at twice — and
+  // `validateApproval` is what makes it safe rather than anything here: the
+  // notice's URL must be an https keeper.bounded.tools address, so a caller can
+  // say THAT an approval is waiting and point at the keeper, and can point
+  // nowhere else.
+  "bounded-systems/.github/.github/workflows/announce-ceremony.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/boot-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/broker-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/create-app.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/keeper-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/pathbase-door-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/repo-admin-apply.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/rotate-lease-key.yml@refs/heads/main",
 ];
 
 /** Kept for callers that want the projection specifically. */

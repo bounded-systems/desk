@@ -4,6 +4,7 @@ import {
   renderIssues, renderClaims, renderPrs, renderOverview, renderUnavailable,
 } from "../src/render.js";
 import { selectPrs } from "../src/select.js";
+import { readFile } from "node:fs/promises";
 
 const board = (o = {}) => ({
   generated_at: "2026-08-25T12:00:00Z", limit: 25,
@@ -47,6 +48,20 @@ const FRESH = Date.parse("2026-08-25T12:30:00Z"); // 30m after the stamp
 const banner = (html) => {
   const m = /<div class="stamp([^"]*)"/.exec(html);
   return m ? m[1].trim() : null;   // "" fresh, "stamp--behind", "stamp--stale"
+};
+
+// The VISIBLE text of the first row's where-line, tags stripped.
+//
+// The where-line is markup now, not a pre-joined string: the `·` is wrapped in
+// `aria-hidden` and the noun ("issue", "pull request") is a visually-hidden span,
+// so a bare /prx · 434/ can no longer match what the page actually renders.
+// Anchored on `</span></a>` because the where-line is the anchor's last child
+// and it contains nested spans of its own. The leading `— ` is deliberate and
+// is asserted: it is a literal boundary in the ACCESSIBLE NAME, not something
+// this page can leave to a screen reader to insert.
+const whereText = (html) => {
+  const m = /<span class="row__where">([\s\S]*?)<\/span>\s*<\/a>/.exec(html);
+  return m ? m[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim() : null;
 };
 
 test("fresh: names the cache window without overclaiming what it bounds", () => {
@@ -155,7 +170,10 @@ const claims = (o = {}) => ({
 test("the claims page renders rows without a marker, and the age", () => {
   const html = renderClaims(claims(), AT, 60);
   assert.match(html, /Claims — Bounded Systems/);
-  assert.match(html, /prx · 434/);
+  // Repo, separator and number, in that order — and the accessible name now
+  // carries the noun too, so a links list can tell prx#434 from prx#9.
+  assert.equal(whereText(html), "— prx · issue 434");
+  assert.match(html, /<span class="visually-hidden">issue <\/span>434/);
   assert.match(html, /3 hours ago/);
   assert.match(html, /a &lt;fix&gt;/);   // escaping holds
 });
@@ -176,9 +194,9 @@ test("the claims page emits no rank slot at all", () => {
   // The class is defined in the shared stylesheet either way, so this must
   // match the ROW MARKUP, not the CSS — a /row__score/ regex passes on the
   // <style> block and proves nothing.
-  assert.doesNotMatch(renderClaims(claims(), AT, 60), /<div class="row__score">/);
+  assert.doesNotMatch(renderClaims(claims(), AT, 60), /<p class="row__score">/);
   // ...while the issue queue, which does have a rank, still emits one.
-  assert.match(renderIssues(board(), AT, 60), /<div class="row__score">/);
+  assert.match(renderIssues(board(), AT, 60), /<p class="row__score">/);
 });
 
 // The public feed drops assignees on purpose. A page that just omitted the name
@@ -228,7 +246,11 @@ test("the PR page renders rows, the claim state, and the age", () => {
   const html = renderPrs(prs(), AT, 60);
   assert.match(html, /PRs — Bounded Systems/);
   assert.match(html, /bump the bun-major group/);
-  assert.match(html, /#1001/);
+  // The rank slot is GONE on this page: it printed `#1001` while the where-line
+  // printed `prx · 1001`, the same number twice, one of them without the repo
+  // that gives it meaning. The where-line is the one that survives.
+  assert.equal(whereText(html), "— prx · pull request 1001 · no live claim");
+  assert.doesNotMatch(html, /class="row__score"/);
   assert.match(html, /no live claim/);
   assert.match(html, /3 hours ago/);
   assert.match(html, /a &lt;fix&gt;/);
@@ -253,7 +275,10 @@ test("a compliant row is not annotated", () => {
   const html = renderPrs(
     prs({ items: [{ repo: "bounded-systems/prx", number: 1, title: "ok", url: "https://e/1", labels: [], claim: "compliant" }] }),
     AT, 60);
-  assert.doesNotMatch(html, /· /);
+  // Was `doesNotMatch(/· /)`, which is no longer specific enough: every row's
+  // where-line separates the repo from the number with one. The claim about a
+  // compliant row is that NOTHING follows the number.
+  assert.equal(whereText(html), "— prx · pull request 1");
 });
 
 // The Worker and the feed deploy independently, so an unrecognised or absent
@@ -262,7 +287,7 @@ test("an unrecognised claim state renders as unknown", () => {
   const html = renderPrs(
     prs({ items: [{ repo: "bounded-systems/prx", number: 1, title: "x", url: "https://e/1", labels: [], claim: "from-a-newer-producer" }] }),
     AT, 60);
-  assert.match(html, /· unknown/);
+  assert.equal(whereText(html), "— prx · pull request 1 · unknown");
   assert.doesNotMatch(html, /undefined/);
 });
 
@@ -312,10 +337,16 @@ test("the overview shows all three, each linked to the host that owns it", () =>
 
 // Quoting the newest would let a live feed vouch for one that stopped.
 test("the overview says its age is the oldest of the feeds shown", () => {
-  const html = renderOverview(overview(), AT, 60);
-  assert.match(html, /Oldest feed projected at/);
-  assert.match(html, /3 hours ago/);
-  assert.match(html, /<strong>oldest<\/strong>/);
+  // The subject is named in EVERY band, which is the point — the three feeds
+  // have three ages and only the stalest is true of all of them. At AT this is
+  // the `behind` band, which now opens with its own state word, so the subject
+  // is asserted rather than one band's sentence shape.
+  for (const at of [FRESH, AT, Date.parse("2026-08-27T12:00:00Z")]) {
+    const html = renderOverview(overview(), at, 60);
+    assert.match(html, /Oldest feed/, "the stamp stopped naming what it dates");
+    assert.match(html, /<strong>oldest<\/strong>/);
+  }
+  assert.match(renderOverview(overview(), AT, 60), /3 hours ago/);
 });
 
 // Never a silent head: showing 1 of 2 has to say so.
@@ -509,4 +540,155 @@ test("the behind band does not shift its text relative to the other two", () => 
   const css = renderIssues(board(), AT, 60).match(/<style>([\s\S]*?)<\/style>/)[1];
   assert.match(css, /\.stamp--behind\s*\{[^}]*box-shadow:\s*inset/);
   assert.ok(!/\.stamp--behind\s*\{[^}]*border-left:\s*3px/.test(css));
+});
+
+// ── desk#61: the board, checked against the REAL render ─────────────────────
+//
+// `test/board-live.json` is a capture of the live projection — real titles, real
+// SHAs, its provenance in `_source`. These assertions run over
+// `renderOverview(fixture)`, which is the same function the Worker calls, so
+// what they measure is the artifact rather than a shape written to satisfy them.
+
+const live = JSON.parse(
+  await readFile(new URL("./board-live.json", import.meta.url), "utf8"),
+);
+const LIVE_AT = Date.parse(live.generated_at) + 3.6e6;
+const liveHtml = () => renderOverview(live, LIVE_AT, 60);
+
+test("no forty-character hex survives the render, outside the href", () => {
+  const html = liveHtml();
+  // GUARD THE GUARD FIRST. An empty render, or a render with no routine rows in
+  // it, would pass this vacuously — and vacuous is exactly how the fixture would
+  // fail if it were ever swapped for something convenient.
+  assert.ok(html.length > 5000, "the render is too small to be the page");
+  assert.match(html, /class="row row--routine"/);
+  const body = html.replace(/href="[^"]*"/g, "");
+  const long = [...body.matchAll(/[0-9a-f]{40}/g)].map((m) => m[0]);
+  assert.deepEqual(long, [], "a full SHA is still being printed as text");
+});
+
+// THE CONSTRAINT THE PAGE MAY NOT BREAK, MADE MECHANICAL. Compression exists so
+// that no row has to be hidden; a change that started filtering rows would make
+// "Showing the first 5 of 6" false, which is the one thing this page has always
+// refused to do. Delete a row from the map in overviewSection and this goes red.
+test("every row the section counted is still rendered", () => {
+  const html = liveHtml();
+  for (const s of live.sections) {
+    const sec = new RegExp(`<section class="sec" id="${s.key}"[\\s\\S]*?</section>`).exec(html);
+    assert.ok(sec, `no ${s.key} section rendered`);
+    const shown = [...sec[0].matchAll(/<li class="row/g)].length;
+    assert.equal(shown, s.items.length, `${s.key}: ${shown} rows for ${s.items.length} items`);
+    assert.equal(shown, Math.min(live.head, s.count), `${s.key}: not the head the feed asked for`);
+    const more = /Showing the first (\d+) of (\d+)/.exec(sec[0]);
+    if (more) assert.equal(Number(more[1]), shown, `${s.key}: the count sentence is now false`);
+  }
+});
+
+test("decorative separators are hidden from assistive technology", () => {
+  // The `·` between the repo and the number is decoration. A links list read
+  // aloud should say "prx issue 434", not "prx dot issue 434" — and the
+  // separator that survives is the one before a claim state, which is also
+  // hidden and also carries no meaning of its own.
+  const html = liveHtml();
+  const dots = [...html.matchAll(/·/g)];
+  assert.ok(dots.length >= 10, `only ${dots.length} separators — nothing to check`);
+  for (const m of dots) {
+    const before = html.slice(Math.max(0, m.index - 40), m.index);
+    assert.match(before, /aria-hidden="true">\s*$/, `a · escaped aria-hidden near: ${before.slice(-60)}`);
+  }
+});
+
+test("the accessible name of a row carries the repo and the number", () => {
+  // It used to be the bare title. In a links list that made prx#434 and prx#348
+  // indistinguishable, and this page's longest two titles are near-identical
+  // dependabot bumps.
+  const html = liveHtml();
+  assert.match(html, /<span class="visually-hidden"> — <\/span>prx/);
+  assert.match(html, /<span class="visually-hidden">issue <\/span>434/);
+  assert.match(html, /<span class="visually-hidden">pull request <\/span>1088/);
+  // And the rank slot says what it is, which differs per section.
+  assert.match(html, /<span class="visually-hidden">Board score <\/span>17\.30/);
+});
+
+test("the rows are a list, and each section is a named landmark", () => {
+  const html = liveHtml();
+  // role="list" beside <ol> is a Safari/VoiceOver workaround: list-style:none
+  // strips the list role there, and with it the "list of 5 items" a reader is
+  // told. Asserted on the markup, since no stylesheet regex could see it.
+  assert.match(html, /<ol class="board board--railed" role="list">/);
+  assert.doesNotMatch(html, /<div class="row"/, "a row is a list item now");
+  for (const s of live.sections) {
+    assert.match(html, new RegExp(`<section class="sec" id="${s.key}" aria-labelledby="${s.key}-h">`));
+    assert.match(html, new RegExp(`<h2 id="${s.key}-h">`));
+  }
+});
+
+test("all three sections reserve the rank rail, including the one with no ranks", () => {
+  // Measured on the live page: the title's left edge was 90px under Issues and
+  // PRs and 20px under Claims, because the public claims feed publishes no
+  // status and those rows render no marker. The board reserves the track; the
+  // row still emits nothing into it, so the slot's meaning is unchanged.
+  const html = liveHtml();
+  const claims = /<section class="sec" id="claims"[\s\S]*?<\/section>/.exec(html)[0];
+  assert.match(claims, /<ol class="board board--railed"/);
+  assert.doesNotMatch(claims, /class="row__score"/, "a claims row invented a marker");
+  assert.equal([...html.matchAll(/class="board board--railed"/g)].length, 3);
+});
+
+// ── Freshness, told apart without colour ────────────────────────────────────
+
+test("each freshness band names itself in words and in an attribute", () => {
+  // box-shadow is not painted under forced-colors and every colour is replaced,
+  // so `behind`'s inset edge vanished and the three bands became identical but
+  // for a 3px indent — with `behind` carrying no state word at all. The
+  // attribute exists so a test can assert the BAND without matching the
+  // stylesheet, which is the trap `banner()` above was written for.
+  const want = [
+    [FRESH, "fresh"],
+    [AT, "behind"],
+    [Date.parse("2026-08-27T12:00:00Z"), "stale"],
+  ];
+  const opening = new Set();
+  for (const [at, band] of want) {
+    const html = renderIssues(board(), at, 60);
+    const m = /<div class="stamp[^"]*" data-freshness="([a-z]+)">\s*(?:<strong>([^<]*)<\/strong>)?/.exec(html);
+    assert.ok(m, `no dated stamp rendered at ${band}`);
+    assert.equal(m[1], band);
+    if (band !== "fresh") {
+      assert.ok(m[2], `the ${band} band opens with no state word`);
+      opening.add(m[2]);
+    }
+  }
+  // Distinct sentences, not the same one twice: "behind" and "stopped" are
+  // different claims and a reader who cannot see the band has only these.
+  assert.equal(opening.size, 2, `the two alarming bands open with: ${[...opening].join(" / ")}`);
+});
+
+test("forced-colors tells the bands apart by something that is not a colour", () => {
+  const css = /<style>([\s\S]*?)<\/style>/.exec(renderIssues(board(), AT, 60))[1];
+  const fc = /@media \(forced-colors: active\) \{([\s\S]*?)\n    \}/.exec(css);
+  assert.ok(fc, "no forced-colors block");
+  // Widths, not colours: colours and shadows are all replaced by the UA.
+  assert.match(fc[1], /\.stamp--behind\s*\{[^}]*border-inline-start-width:\s*4px/);
+  assert.match(fc[1], /\.stamp--stale\s*\{[^}]*border-width:\s*3px/);
+  assert.doesNotMatch(fc[1], /box-shadow/, "box-shadow is not painted under forced-colors");
+});
+
+// A COUNTER-TEST, NOT A MEDIA BLOCK ASSERTING ITSELF. src/*.js declares no
+// transition, animation or scroll-behavior today, so shipping a
+// prefers-reduced-motion block would be dead CSS that no test could tell from a
+// correct one — the exact self-scaffolding shape this repo keeps hitting. What
+// is enforceable is the RULE: any future motion ships with its guard in the same
+// commit. Currently 0 === 0; red on the first unguarded declaration.
+test("no motion ships without a reduced-motion guard", async () => {
+  const files = ["src/render.js", "src/worker.js"];
+  let declared = 0, guarded = 0;
+  for (const f of files) {
+    const css = (await readFile(f, "utf8")).replace(/\/\*[\s\S]*?\*\//g, "");
+    declared += [...css.matchAll(/(?:^|[;{\s])(transition|animation|scroll-behavior)\s*:/g)].length;
+    for (const m of css.matchAll(/@media \(prefers-reduced-motion[^)]*\)\s*\{([\s\S]*?)\n\s{0,6}\}/g)) {
+      guarded += [...m[1].matchAll(/(?:^|[;{\s])(transition|animation|scroll-behavior)\s*:/g)].length;
+    }
+  }
+  assert.equal(declared, guarded, `${declared} motion declarations, ${guarded} inside a reduced-motion guard`);
 });

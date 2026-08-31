@@ -1,13 +1,53 @@
 // The door on /notify (#37). Every test here is a way in that must stay shut.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { verifyJwt, verifyNotifyCaller, NOTIFY_AUDIENCE, NOTIFY_WORKFLOW_REF } from "../src/oidc.js";
+import {
+  verifyJwt, verifyNotifyCaller, NOTIFY_AUDIENCE, NOTIFY_WORKFLOW_REF, NOTIFY_WORKFLOW_REFS,
+} from "../src/oidc.js";
 import { issuer } from "./oidc-fixture.mjs";
 
 test("a token from the pinned workflow, at the pinned audience, is accepted", async () => {
   const iss = await issuer();
   const claims = await verifyNotifyCaller(await iss.mint(), { getJwks: iss.getJwks });
   assert.equal(claims.job_workflow_ref, NOTIFY_WORKFLOW_REF);
+});
+
+test("EVERY pinned lane is accepted, not just the first", async () => {
+  // The list is a capability grant, and the failure it must not have is a lane
+  // that was added to the constant and does not actually work — noticed at 3am
+  // by an approval notice that never arrived. So this iterates the constant
+  // rather than naming a ref: adding an entry adds a case here for free, and a
+  // typo in one is a red test rather than a silent hole.
+  const iss = await issuer();
+  assert.ok(NOTIFY_WORKFLOW_REFS.length >= 10, "the projection, desk deploy, the announce lane, and infra's seven ceremony lanes");
+  for (const ref of NOTIFY_WORKFLOW_REFS) {
+    const claims = await verifyNotifyCaller(await iss.mint({ workflowRef: ref }), { getJwks: iss.getJwks });
+    assert.equal(claims.job_workflow_ref, ref);
+  }
+});
+
+test("a lane infra was NOT granted is refused, however close its name", async () => {
+  // infra#526's rule stated as a test. SEVEN infra lanes are pinned; the other
+  // twenty-three are not, and there is no prefix, wildcard, or repository-level
+  // form that would admit the seven without admitting the rest.
+  //
+  // The first case is `cloudflare-apply.yml` ON PURPOSE, and not a made-up
+  // filename: it is a real lane on infra's main that already carries
+  // `id-token: write`, so it can mint a token for this audience whenever it
+  // likes. A negative case naming a file that does not exist in infra proves
+  // only that an impossible caller is refused; this one proves that a caller
+  // which can actually knock is.
+  const iss = await issuer();
+  for (const ref of [
+    "bounded-systems/infra/.github/workflows/cloudflare-apply.yml@refs/heads/main",
+    "bounded-systems/infra/.github/workflows/broker-deploy.yml@refs/heads/next",
+    "bounded-systems/infra-staging/.github/workflows/broker-deploy.yml@refs/heads/main",
+  ]) {
+    const jwt = await iss.mint({ workflowRef: ref });
+    await assert.rejects(
+      () => verifyNotifyCaller(jwt, { getJwks: iss.getJwks }), /workflow not allowed/, ref,
+    );
+  }
 });
 
 test("another workflow in the same repo is refused", async () => {
