@@ -547,7 +547,7 @@ test("no token is a 401, and a token from the wrong workflow is a 403", async ()
   assert.equal((await notify(null, env)).status, 401);
 
   const wrong = await ISS.mint({
-    workflowRef: "bounded-systems/.github-private/.github/workflows/org-sync.yml@refs/heads/main",
+    workflowRef: "bounded-systems/infra/.github/workflows/cloudflare-apply.yml@refs/heads/main",
   });
   const res = await notify(wrong, env);
   assert.equal(res.status, 403);
