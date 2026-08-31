@@ -50,10 +50,18 @@ test("a lane infra was NOT granted is refused, however close its name", async ()
   }
 });
 
+// A REAL lane that is deliberately not on the list: infra's cloudflare-apply
+// holds `id-token: write`, so it can mint for this audience whenever it likes —
+// a caller the pin has to actively refuse. A workflow that does not exist would
+// prove only that an impossible caller is refused.
+//
+// It must stay OFF NOTIFY_WORKFLOW_REFS. This test previously named org-sync,
+// which infra#553 then allowlisted; the test failed, correctly, and that is how
+// this comment came to exist.
 test("another workflow in the same repo is refused", async () => {
   const iss = await issuer();
   const jwt = await iss.mint({
-    workflowRef: "bounded-systems/.github-private/.github/workflows/org-sync.yml@refs/heads/main",
+    workflowRef: "bounded-systems/infra/.github/workflows/cloudflare-apply.yml@refs/heads/main",
   });
   await assert.rejects(() => verifyNotifyCaller(jwt, { getJwks: iss.getJwks }), /workflow not allowed/);
 });

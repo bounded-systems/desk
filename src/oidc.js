@@ -98,6 +98,23 @@ export const NOTIFY_WORKFLOW_REFS = [
   // exceptions is the thing this org spends its effort removing.
   "bounded-systems/bounded.tools/.github/workflows/deploy.yml@refs/heads/main",
   "bounded-systems/front-desk-scheduler/.github/workflows/lease-deploy.yml@refs/heads/main",
+
+  // The remaining seven, which closes the set (infra#553). An audit of every
+  // workflow containing `authorize/start` found SEVENTEEN ceremony lanes, not
+  // the eleven an earlier count claimed — six in .github-private and the site
+  // promote in .github had never been counted at all.
+  //
+  // That is the whole argument for the ratchet that now guards this list: the
+  // gap was not that a lane was hard to wire, it was that nobody knew the lane
+  // existed. A count kept by hand drifts silently; a check that reads the
+  // workflow files does not.
+  "bounded-systems/.github/.github/workflows/site-deploy.yml@refs/heads/main",
+  "bounded-systems/.github-private/.github/workflows/adopt-claude-harness.yml@refs/heads/main",
+  "bounded-systems/.github-private/.github/workflows/front-desk-reroll.yml@refs/heads/main",
+  "bounded-systems/.github-private/.github/workflows/merge-claude-harness.yml@refs/heads/main",
+  "bounded-systems/.github-private/.github/workflows/org-baseline.yml@refs/heads/main",
+  "bounded-systems/.github-private/.github/workflows/org-sync.yml@refs/heads/main",
+  "bounded-systems/.github-private/.github/workflows/reroll-claude-harness.yml@refs/heads/main",
 ];
 
 /** Kept for callers that want the projection specifically. */
