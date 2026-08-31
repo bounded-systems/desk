@@ -52,13 +52,16 @@ export const NOTIFY_WORKFLOW_REFS = [
   //
   // SEVEN ENTRIES FOR WHAT IS ONE CHANGE UPSTREAM, and that is infra#526 doing its
   // job rather than a redundancy worth collapsing. `job_workflow_ref` names a
-  // FILE at a REF; there is no wildcard, no repository-level form, and nothing
-  // shorter that would admit these two without also admitting every other
-  // workflow in infra — a repo with deploy lanes that hold real credentials. The
-  // list gets longer as callers are added. That is the cost of the pin being
-  // exact, and it is the cheaper side of the trade: a list that grows by a
-  // reviewed line is visible, where a pattern that stops growing is a grant
-  // nobody re-reads.
+  // FILE at a REF; there is no wildcard and no repository-level form, so the
+  // only shorter spelling is one that matches on the repo — and infra carries
+  // thirty workflows. Twenty-three of them are not on this list, nine of those
+  // already request `id-token: write`, and any of the rest is one line away from
+  // it: a repo-level grant would hand the fan-out to every lane in a repo that
+  // applies Cloudflare state, not to seven reviewed ones. The list gets longer
+  // as callers are added.
+  // That is the cost of the pin being exact, and it is the cheaper side of the
+  // trade: a list that grows by a reviewed line is visible, where a pattern that
+  // stops growing is a grant nobody re-reads.
   //
   // Each is pinned to `refs/heads/main` for the same reason as the two above: a
   // branch or a fork mints a token with a different ref, so opening a PR against

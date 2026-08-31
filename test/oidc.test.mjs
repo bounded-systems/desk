@@ -27,13 +27,19 @@ test("EVERY pinned lane is accepted, not just the first", async () => {
 });
 
 test("a lane infra was NOT granted is refused, however close its name", async () => {
-  // infra#526's rule stated as a test. `broker-deploy.yml` and
-  // `keeper-deploy.yml` are pinned; nothing else in infra is, and there is no
-  // prefix, wildcard, or repository-level form that would admit these two
-  // without admitting the rest of a repo whose lanes hold real credentials.
+  // infra#526's rule stated as a test. SEVEN infra lanes are pinned; the other
+  // twenty-three are not, and there is no prefix, wildcard, or repository-level
+  // form that would admit the seven without admitting the rest.
+  //
+  // The first case is `cloudflare-apply.yml` ON PURPOSE, and not a made-up
+  // filename: it is a real lane on infra's main that already carries
+  // `id-token: write`, so it can mint a token for this audience whenever it
+  // likes. A negative case naming a file that does not exist in infra proves
+  // only that an impossible caller is refused; this one proves that a caller
+  // which can actually knock is.
   const iss = await issuer();
   for (const ref of [
-    "bounded-systems/infra/.github/workflows/deploy.yml@refs/heads/main",
+    "bounded-systems/infra/.github/workflows/cloudflare-apply.yml@refs/heads/main",
     "bounded-systems/infra/.github/workflows/broker-deploy.yml@refs/heads/next",
     "bounded-systems/infra-staging/.github/workflows/broker-deploy.yml@refs/heads/main",
   ]) {

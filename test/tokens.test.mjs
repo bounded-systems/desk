@@ -104,10 +104,11 @@ test("the stated gaps really are gaps", async (t) => {
   // dark accent at ΔE 3.47, or that `grade.aspirational-on-dark-bg` being ΔE
   // 0.32 from a hairline is a coincidence rather than a mapping. Those are
   // arguments, and they are written down where they can be disagreed with.
-  let json;
+  let json, css;
   try {
     const { pkgRoot } = await import("../scripts/make-tokens.mjs");
     json = JSON.parse(await readFile(pkgRoot() + "tokens/tokens.json", "utf8"));
+    css = await readFile(pkgRoot() + "tokens/tokens.css", "utf8");
   } catch {
     return t.skip("@bounded-systems/brand is not installed");
   }
@@ -117,6 +118,23 @@ test("the stated gaps really are gaps", async (t) => {
       if (v?.$type === "color" && /^#/.test(v.$value)) brand.add(v.$value.toUpperCase());
     }
   }
+  // AND THE STYLESHEET, because tokens.json is not all of what brand publishes.
+  // The `grade` tier in tokens.json carries three swatches; tokens.css carries
+  // those three plus twelve values a build step DERIVES from them — the
+  // `-bg`/`-fg`/`-on-dark`/`-on-dark-bg` families. Scanning only the JSON leaves
+  // this check blind to twelve real brand colours, and blind in exactly the
+  // wrong direction: the `-on-dark*` family is the only dark-aware thing the
+  // package ships, so it is where a token for one of desk's eight dark gaps
+  // would first appear. This test would have gone on reporting "the stated gaps
+  // really are gaps" while the gap it is loudest about — dark `--line` against
+  // `grade.aspirational-on-dark-bg`, ΔE 0.32 — had quietly become a real match.
+  for (const m of css.matchAll(/#[0-9a-fA-F]{6}\b/g)) brand.add(m[0].toUpperCase());
+  // A set that stopped being populated would make every assertion below pass
+  // vacuously, which is the failure `docs/agentic-code-hygiene.md` rule 3 names:
+  // a gate's own claim about itself is not evidence. Pin the floor to the JSON
+  // tiers alone so a brand restructure that empties either source is red here
+  // rather than silently permissive.
+  assert.ok(brand.size > 19, `only ${brand.size} brand colours found — the scan has narrowed`);
   for (const [role, value] of Object.entries(UNPINNED)) {
     assert.ok(!brand.has(value.toUpperCase()), `${role} ${value} is a brand colour after all — pin it`);
   }

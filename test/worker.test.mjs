@@ -7,6 +7,7 @@ import worker from "../src/worker.js";
 import { issuer } from "./oidc-fixture.mjs";
 import { b64url } from "../src/push.js";
 import { listSubscriptions } from "../src/subscriptions.js";
+import { FOREST } from "../src/tokens.js";
 
 const BOARD = {
   feed: "front-desk-public",
@@ -814,9 +815,20 @@ test("the manifest has a stable id, so start_url can move without orphaning inst
 test("the splash colour is the brand green, not a page background", async () => {
   // background_color cannot be media-queried — one value serves both launches.
   // The light page colour meant a dark-mode launch flashed #fbfaf8.
+  //
+  // FOREST rather than the literal, which this test used to type. The literal
+  // was correct, and that was the problem: it was a FOURTH copy of #0C5A42
+  // (tokens.js, worker.js, icons.test.mjs, here) in a change whose whole point
+  // is that the value is transcribed nowhere. Typing it here would mean a brand
+  // release that retunes `color.forest` shows up as this test failing — which
+  // reads as "the manifest broke" when what actually happened is "the brand
+  // moved". The contract this test owns is that the splash is the BRAND GREEN
+  // and that both fields carry the same one; that the brand green is still what
+  // the package says is tokens.test.mjs's drift check, and it is the only place
+  // that comparison belongs.
   const m = await (await get("desk.bounded.tools", "/manifest.webmanifest")).json();
-  assert.equal(m.background_color, "#0C5A42");
-  assert.equal(m.theme_color, "#0C5A42");
+  assert.equal(m.background_color, FOREST);
+  assert.equal(m.theme_color, FOREST);
 });
 
 test("shortcuts stay inside scope, or a launcher silently ignores them", async () => {
