@@ -20,6 +20,8 @@
 // that owns it, and a footer line says where.
 
 import { LIGHT, DARK, vars } from "./palette.js";
+import { scaleVars } from "./scale.js";
+import { compress } from "./title.js";
 
 // TWO BANDS, BECAUSE ONE THRESHOLD CANNOT SAY BOTH THINGS.
 //
@@ -71,15 +73,23 @@ function stamp(generatedAt, now, edgeTtlSeconds, what = "Board", extra = "") {
   const ageMs = now - Date.parse(generatedAt);
   const when = esc(generatedAt);
   if (isStale(generatedAt, now)) {
-    return `<div class="stamp stamp--stale">
+    return `<div class="stamp stamp--stale" data-freshness="stale">
         <strong>This snapshot is old.</strong> ${esc(what)} projected at <span class="mono">${when}</span>,
         ${esc(humanAge(ageMs))} ago — more than ${STALE_AFTER_HOURS} hours. The projection lane publishes
         hourly, so this means it stopped. Treat what follows as history, not as the board.${extra}
       </div>`;
   }
   if (isBehind(generatedAt, now)) {
-    return `<div class="stamp stamp--behind">
-        ${esc(what)} projected at <span class="mono">${when}</span>, <strong>${esc(humanAge(ageMs))} ago</strong>.
+    // A STATE WORD, because the band cannot be the only thing that says which
+    // state this is. `stale` has always opened with one; `behind` opened with
+    // the timestamp, and its distinguishing mark was an inset box-shadow —
+    // which forced-colors does not paint. So a forced-colors reader met
+    // "behind" and "fresh" as the same banner. The sentence says it now, and
+    // data-freshness lets a test assert the band without matching the
+    // stylesheet (the trap render.test.mjs's `banner()` helper exists for).
+    return `<div class="stamp stamp--behind" data-freshness="behind">
+        <strong>${esc(what)} is behind.</strong> Projected at <span class="mono">${when}</span>,
+        <strong>${esc(humanAge(ageMs))} ago</strong>.
         The publishing lane is scheduled hourly, but GitHub runs scheduled workflows best-effort and
         drops slots under load — measured delivery is well under half, so gaps of several hours are
         normal rather than a fault. Work listed here may have been picked up since.${extra}
@@ -95,7 +105,7 @@ function stamp(generatedAt, now, edgeTtlSeconds, what = "Board", extra = "") {
   // What the edge TTL actually bounds is how stale the *rendered page* is
   // relative to the feed, which is the smaller and less interesting number. Say
   // that, rather than promising something this page cannot know.
-  return `<div class="stamp">
+  return `<div class="stamp" data-freshness="fresh">
         ${esc(what)} projected at <span class="mono">${when}</span>, ${esc(humanAge(ageMs))} ago.
         Read live per request and cached at the edge for up to ${edgeTtlSeconds}s; the age shown is
         the snapshot's own, and how far it trails the newest one depends on when the publishing lane
@@ -108,24 +118,83 @@ const tile = (n, l) =>
 
 const shortRepo = (r) => String(r).replace(/^bounded-systems\//, "");
 
+/** Text for assistive technology only — see `.visually-hidden` in STYLE. */
+const vh = (s) => `<span class="visually-hidden">${esc(s)}</span>`;
+
 /**
- * One list row: an optional left-hand marker, the linked title, and where it
- * lives.
+ * One list row: an optional left-hand marker, and ONE link carrying the title
+ * and where it lives.
+ *
+ * THE WHOLE ROW BODY IS THE LINK, AND THAT IS THE POINT. It was a 16–21px line
+ * box around the title text alone — measured, 60 of 60 links on the live page
+ * were under the 24px WCAG 2.2 floor, and `elementFromPoint` at a row's
+ * top-right corner returned the row rather than the anchor, so the right-hand
+ * two-thirds of every row was dead space. A block link with a `--control-md`
+ * floor makes the target the thing a reader is actually aiming at.
+ *
+ * THE ACCESSIBLE NAME NOW CARRIES THE REPO AND THE NUMBER. It used to be the
+ * bare title, so in a links list `prx#434` and `prx#348` were indistinguishable
+ * — and this page's two longest titles are near-identical dependabot bumps. The
+ * `— ` and the noun are literal text inside the name rather than a hoped-for
+ * boundary from `display:block`, because whether a screen reader inserts one is
+ * not a property this page controls.
+ *
+ * The `·` is decoration and is hidden from assistive tech; the noun differs per
+ * page ("issue", "pull request") and is passed in rather than guessed.
  *
  * `marker` is null on the claims page (#10) and the slot is then omitted
  * entirely rather than rendered empty. The slot means "the board's numeric
  * rank" on issues.bounded.tools, so filling it with anything else — as the
  * claims page did with `Status` — makes the two pages disagree about what the
- * same position means.
+ * same position means. The rail's WIDTH is reserved by the board (see
+ * `.board--railed`), so a markerless row still lines up with its neighbours
+ * without an empty element being emitted to do it.
+ *
+ * The marker stays OUTSIDE the anchor: it is not what you navigate to, and the
+ * `<ol>` already announces position.
  */
-const row = (marker, title, url, where) =>
-  `<div class="row">
-        ${marker == null ? "" : `<div class="row__score">${esc(marker)}</div>`}
-        <div class="row__body">
-          <p class="row__title"><a href="${esc(url)}">${esc(title)}</a></p>
-          <p class="row__where">${esc(where)}</p>
-        </div>
-      </div>`;
+const row = ({ marker, markerLabel = "", title, url, repo, number, noun, suffix = "" }) => {
+  const c = compress(title);
+  const routine = c.kind !== "plain";
+  return `<li class="row${routine ? " row--routine" : ""}">${
+    marker == null ? "" : `\n        <p class="row__score">${vh(markerLabel + " ")}${esc(marker)}</p>`
+  }
+        <a class="row__link" href="${esc(url)}">
+          <span class="row__title">${
+            routine
+              ? `<span class="row__subject">${esc(c.subject)}</span> <span class="row__delta">${esc(c.delta)}</span>`
+              : esc(title)
+          }</span>
+          <span class="row__where">${vh(" — ")}${esc(shortRepo(repo))}<span aria-hidden="true"> · </span>${vh(
+            noun + " ",
+          )}${esc(number)}${suffix ? `<span aria-hidden="true"> · </span>${esc(suffix)}` : ""}</span>
+        </a>
+      </li>`;
+};
+
+/**
+ * The rows, as a list.
+ *
+ * `<ol>` rather than `<ul>` on all four pages: the order carries information on
+ * every one of them — ranked, most-recently-claimed, newest-first.
+ *
+ * `role="list"` beside it is not redundant decoration: `list-style:none` strips
+ * the list role in Safari/VoiceOver, so without it the count a reader is told
+ * ("list of 5 items") disappears on the browser this page is most often read in.
+ * It is a workaround for a browser, not a spec requirement, and if the org would
+ * rather not carry redundant ARIA the alternative is `list-style-type:"\200B"`.
+ *
+ * `railed` reserves the marker track WITHOUT emitting an element into it. That
+ * is the difference from a spacer: the slot's meaning is still "the board's
+ * numeric rank", a page with no rank still emits nothing, and the four pages
+ * still line their titles up. Measured on the live overview, the title's left
+ * edge was 90px in the issues and prs sections and 20px in claims — a 70px
+ * discontinuity down a page whose whole job is to be scanned in one pass.
+ */
+const board = (rows, railed = false) =>
+  `<ol class="board${railed ? " board--railed" : ""}" role="list">
+        ${rows.join("\n        ")}
+      </ol>`;
 
 // THE COLOURS ARE NO LONGER TYPED HERE. Six of the light eight are brand tokens
 // now (src/tokens.js, generated from @bounded-systems/brand); the other two and
@@ -134,13 +203,13 @@ const row = (marker, title, url, where) =>
 // to one block and forgotten in the other — the two lines used to be independent
 // prose, and nothing checked that they declared the same set.
 const STYLE = `
-    :root { ${vars(LIGHT)} }
+    :root { ${vars(LIGHT)} ${scaleVars()} }
     @media (prefers-color-scheme: dark) {
       :root { ${vars(DARK)} }
     }
     * { box-sizing: border-box; }
     body { margin:0; background:var(--bg); color:var(--fg);
-      font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+      font:var(--text-body)/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
       /* Prevents iOS enlarging body text in landscape, which reflows the tile
          row into something the layout was not measured against. */
       -webkit-text-size-adjust:100%; }
@@ -150,26 +219,46 @@ const STYLE = `
        content runs under both. The insets are ADDED to the existing padding
        rather than replacing it, so nothing changes on the web. */
     .wrap { max-width:52rem; margin:0 auto;
-      padding:2.5rem 1.25rem 4rem;
-      padding-left:calc(1.25rem + env(safe-area-inset-left));
-      padding-right:calc(1.25rem + env(safe-area-inset-right));
-      padding-top:calc(2.5rem + env(safe-area-inset-top));
-      padding-bottom:calc(4rem + env(safe-area-inset-bottom)); }
+      padding:var(--wrap-top) var(--wrap-side) var(--wrap-bottom);
+      padding-left:calc(var(--wrap-side) + env(safe-area-inset-left));
+      padding-right:calc(var(--wrap-side) + env(safe-area-inset-right));
+      padding-top:calc(var(--wrap-top) + env(safe-area-inset-top));
+      padding-bottom:calc(var(--wrap-bottom) + env(safe-area-inset-bottom)); }
+
+    /* Text for assistive technology and nothing else. clip-path rather than
+       clip: the latter is deprecated and a 1px box with overflow:hidden alone
+       still gets read as an empty line by some screen readers. */
+    .visually-hidden { position:absolute; width:1px; height:1px; margin:-1px; padding:0;
+      overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
 
     /* FOCUS WAS INVISIBLE, and this page is now keyboard- and switch-operable
        in a way it was not: links here suppress the UA underline in favour of a
-       border-bottom, which also suppresses the default focus ring's contrast on
+       drawn one, which also suppresses the default focus ring's contrast on
        some browsers. One explicit rule for everything focusable. */
-    :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:.2rem; }
-    h1 { font-size:1.6rem; margin:0 0 .35rem; letter-spacing:-.01em; }
-    h2 { font-size:1.05rem; margin:0; letter-spacing:-.005em; }
-    h2 a { color:inherit; text-decoration:none; border-bottom:1px solid var(--line); }
-    h2 a:hover { border-bottom-color:var(--accent); }
-    .lede { color:var(--muted); margin:0 0 1.75rem; }
-    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em; }
-    .muted { color:var(--muted); font-size:.9rem; }
-    .stamp { border:1px solid var(--line); background:var(--card); border-radius:.6rem;
-      padding:.8rem 1rem; margin-bottom:1.5rem; font-size:.92rem; color:var(--muted); }
+    :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:var(--radius-focus); }
+    h1 { font-size:var(--text-h2); margin:0 0 var(--space-1); letter-spacing:-.01em; }
+    h2 { font-size:var(--text-lead); margin:0; letter-spacing:-.005em; }
+    /* A REAL UNDERLINE, and a target with a floor. The border-bottom this
+       replaces sat below the descenders, could not skip ink, and — once a
+       heading wrapped — drew one rule per line box with gaps between them.
+       What takes this link over the 24px WCAG 2.2 target floor is the
+       inline-block and its padding, on the taller --text-lead step: measured,
+       all three section headings were 21px and are now 36. The min-height is a
+       FLOOR, not the cause — at today's type size it does not bind, and
+       deleting it changes nothing measurable. It is here so a future smaller
+       heading cannot quietly drop back under the floor. */
+    h2 a { color:inherit; display:inline-block; padding-block:var(--space-1);
+      min-height:var(--min-tap-target);
+      text-decoration:underline; text-decoration-color:var(--line);
+      text-decoration-thickness:1px; text-underline-offset:.18em;
+      text-decoration-skip-ink:auto; }
+    h2 a:hover { text-decoration-color:var(--accent); }
+    .lede { color:var(--muted); margin:0 0 var(--space-7); }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:var(--mono-optical); }
+    .muted { color:var(--muted); font-size:var(--text-meta); }
+    .stamp { border:1px solid var(--line); background:var(--card); border-radius:var(--radius-sm);
+      padding:var(--space-3) var(--space-4); margin-bottom:var(--space-6);
+      font-size:var(--text-meta); color:var(--muted); }
     .stamp--stale { border-color:var(--warn); background:var(--warnbg); color:var(--warn); }
     /* Informational, not an alarm: a distinct left edge rather than the warn
        ground, so "behind" never reads as "broken" at a glance. */
@@ -177,43 +266,109 @@ const STYLE = `
        a plain border-left:3px would shift the text 2px relative to the fresh and
        stale bands, and three stamps that do not share a left edge read as three
        different components rather than one control in three states. */
-    .stamp--behind { box-shadow:inset 3px 0 0 var(--accent); padding-left:calc(1rem + 3px); }
+    .stamp--behind { box-shadow:inset 3px 0 0 var(--accent); padding-left:calc(var(--space-4) + 3px); }
     /* minmax(0,1fr) as the floor, with auto-fit doing the wrapping: the PR page
        carries FOUR tiles since #29 added unknown, and at a 7.5rem minimum the
        fourth wrapped alone onto its own row on a phone — one number stranded
        under three, which reads as more important rather than merely later.
        A 2x2 at narrow widths keeps them a set. */
-    .desk__tiles { display:grid; gap:.75rem; margin-bottom:1.75rem;
+    .desk__tiles { display:grid; gap:var(--space-3); margin-bottom:var(--space-7);
       grid-template-columns:repeat(auto-fit,minmax(min(100%,7.5rem),1fr)); }
     @media (max-width:26rem) { .desk__tiles { grid-template-columns:repeat(2,1fr); } }
-    .tile { border:1px solid var(--line); background:var(--card); border-radius:.6rem; padding:.8rem 1rem; }
-    .tile__n { font-size:1.5rem; font-weight:650; line-height:1.1; }
-    .tile__l { color:var(--muted); font-size:.82rem; margin-top:.15rem; }
-    .row { display:flex; gap:1rem; align-items:baseline; padding:.7rem 0; border-top:1px solid var(--line); }
-    .row__score { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86rem;
-      color:var(--accent); min-width:3.4rem; text-align:right; flex:none; }
-    .row__body { min-width:0; }
-    .row__title { margin:0; }
-    .row__title a { color:inherit; text-decoration:none; border-bottom:1px solid var(--line); }
-    .row__title a:hover { border-bottom-color:var(--accent); }
-    .row__where { margin:.15rem 0 0; color:var(--muted); font-size:.82rem;
+    .tile { border:1px solid var(--line); background:var(--card); border-radius:var(--radius-sm);
+      padding:var(--space-3) var(--space-4); }
+    .tile__n { font-size:var(--text-h3); font-weight:650; line-height:1.1; }
+    .tile__l { color:var(--muted); font-size:var(--text-small); margin-top:var(--space-1); }
+
+    /* ── THE BOARD ───────────────────────────────────────────────────────────
+       GRID, NOT FLEX, for two reasons flex could not give: the marker must be a
+       fixed track the title cannot push around, and a page with no marker needs
+       the track GONE rather than empty. The named lines are declared on the base
+       rule as well as the railed one so a lookup can never fall through to an
+       implicit column. */
+    .board { list-style:none; margin:0; padding:0; }
+    .row { display:grid; grid-template-columns:[score] 0 [link] minmax(0,1fr);
+      column-gap:0; align-items:start; border-top:1px solid var(--line); }
+    .board--railed .row { grid-template-columns:[score] var(--rail-width) [link] minmax(0,1fr);
+      column-gap:var(--space-3); }
+    .row__score { grid-column:score; grid-row:1; margin:0; padding-top:var(--space-3);
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+      font-size:var(--text-small); color:var(--accent);
+      text-align:right; font-variant-numeric:tabular-nums; }
+    .row__link { grid-column:link; grid-row:1; display:block;
+      min-height:var(--control-md); padding:var(--space-3) 0;
+      color:inherit; text-decoration:none; }
+    /* THE UNDERLINE IS ON THE TITLE, NOT A BORDER ON THE ROW. Once the anchor
+       became a block, a border-bottom would have drawn one full-width rule under
+       every row; and on a wrapping title the old border drew one disconnected
+       segment per line. Kept AT REST rather than on hover only: the title is
+       color:inherit, so with no underline the only thing marking a link would
+       be colour — WCAG 1.4.1. */
+    .row__title { display:block; overflow-wrap:anywhere;
+      text-decoration:underline; text-decoration-color:var(--line);
+      text-decoration-thickness:1px; text-underline-offset:.18em;
+      text-decoration-skip-ink:auto; }
+    .row__link:hover .row__title { text-decoration-color:var(--accent); }
+    .row__where { display:block; margin:var(--space-1) 0 0; color:var(--muted);
+      font-size:var(--text-small);
       font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-    .sec { margin:0 0 2rem; }
-    .sec__head { display:flex; align-items:baseline; justify-content:space-between; gap:1rem;
-      padding-bottom:.4rem; border-bottom:2px solid var(--line); }
-    .sec__n { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86rem; color:var(--muted); flex:none; }
-    .sec__more { margin:.6rem 0 0; }
-    footer { margin-top:2.5rem; padding-top:1.25rem; border-top:1px solid var(--line); }
-    .notify { margin-top:2.5rem; padding:1rem 1.25rem; border:1px solid var(--line);
-              border-radius:.6rem; background:var(--card); }
-    .notify h2 { margin:0 0 .35rem; }
-    .notify p { margin:.35rem 0; }
-    /* min-height 44px: the platform touch-target floor, and this is the only
-       thing on the whole site anyone taps — on the device it was pinned to. */
-    .notify button { font:inherit; padding:.6rem 1.1rem; min-height:44px; border-radius:.5rem;
+
+    /* Tier C — routine. DEMOTED, never hidden, never truncated: a dependabot row
+       is still a row, its count is still in the section head, and its SHAs are
+       what tell four otherwise identical rows apart. The underline comes off
+       here because the link is the whole body of a list row rather than a link
+       inside a paragraph, and --muted on --bg measures 5.39:1 light /
+       7.08:1 dark, so the demoted text still clears AA on its own. */
+    .row--routine .row__link { padding:var(--space-2) 0; }
+    .row--routine .row__score { color:var(--muted); }
+    .row--routine .row__title { font-size:var(--text-meta); line-height:1.35;
+      text-decoration:none; color:var(--muted); }
+    .row--routine .row__subject { color:var(--fg); }
+    .row--routine .row__delta { font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+      font-size:var(--text-label); color:var(--muted); white-space:nowrap; }
+
+    .sec { margin:0 0 var(--space-8); }
+    .sec__head { display:flex; align-items:baseline; justify-content:space-between; gap:var(--space-4);
+      padding-bottom:var(--space-2); border-bottom:2px solid var(--line); }
+    .sec__n { margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+      font-size:var(--text-small); color:var(--muted); flex:none; }
+    .sec__more { margin:var(--space-2) 0 0; }
+    footer { margin-top:var(--space-10); padding-top:var(--space-5); border-top:1px solid var(--line); }
+    .notify { margin-top:var(--space-10); padding:var(--space-4) var(--space-5); border:1px solid var(--line);
+              border-radius:var(--radius-sm); background:var(--card); }
+    .notify h2 { margin:0 0 var(--space-1); }
+    .notify p { margin:var(--space-1) 0; }
+    /* min-height is control.md: the platform touch-target floor, which the
+       design system already owns and documents (WCAG 2.2 SC 2.5.5 AAA). It was
+       typed here as 44px beside a comment re-deriving that rationale, which is
+       the same hand-transcription palette.js exists to stop. */
+    .notify button { font:inherit; padding:var(--space-2) var(--space-4); min-height:var(--control-md);
+                     border-radius:var(--radius-sm);
                      cursor:pointer; border:1px solid var(--accent);
                      background:var(--accent); color:var(--bg); }
-    .notify button:disabled { opacity:.6; cursor:default; }`;
+    .notify button:disabled { opacity:.6; cursor:default; }
+
+    /* ── FORCED COLOURS ──────────────────────────────────────────────────────
+       box-shadow IS NOT PAINTED under forced-colors and every colour is
+       replaced, so behind's inset edge vanished and the three freshness bands
+       became identical but for a 3px indent. The stale band at least opened with
+       a state word; the behind band had none at all, so for a
+       forced-colors reader "behind" and "fresh" were the same banner — state
+       carried by colour alone, WCAG 1.4.1. Border WIDTHS are not forced, so the
+       bands are told apart by a property that survives.
+
+       There is deliberately NO prefers-reduced-motion block: src/*.js declares
+       no transition, animation or scroll-behavior, so one would be dead CSS that
+       no test could tell from a correct one. The rule is that any future
+       transition ships with its guard in the same commit, and render.test.mjs
+       enforces that as a counter-test rather than as a media block asserting
+       itself. */
+    @media (forced-colors: active) {
+      .stamp--behind { border-inline-start-width:4px; }
+      .stamp--stale { border-width:3px; }
+      :focus-visible { outline-color:Highlight; }
+    }`;
+
 
 /**
  * The app-shell head, desk only (#51).
@@ -304,9 +459,20 @@ function issueRows(d) {
   // "prx &middot; 434", not "bounded-systems/prx#434": the org prefix is identical on
   // every row and pure noise in a list built to be scanned. The title already
   // links to the issue; this line only says where it lives.
-  return d.items
-    .map((i) => row(i.score.toFixed(2), i.title, i.url, `${shortRepo(i.repo)} · ${i.number}`))
-    .join("\n      ");
+  return board(
+    d.items.map((i) =>
+      row({
+        marker: i.score.toFixed(2),
+        markerLabel: "Board score",
+        title: i.title,
+        url: i.url,
+        repo: i.repo,
+        number: i.number,
+        noun: "issue",
+      }),
+    ),
+    true,
+  );
 }
 
 function issuesHeldBack(d) {
@@ -345,9 +511,11 @@ export function renderClaims(d, now = Date.now(), edgeTtlSeconds = 60) {
   const description =
     "What is already spoken for — every open board row carrying a claim, so a session can see what not to start.";
   const list = d.items.length
-    ? d.items
-        .map((i) => row(null, i.title, i.url, `${shortRepo(i.repo)} · ${i.number}`))
-        .join("\n      ")
+    ? board(
+        d.items.map((i) =>
+          row({ marker: null, title: i.title, url: i.url, repo: i.repo, number: i.number, noun: "issue" }),
+        ),
+      )
     : `<div class="stamp">
         <strong>Nothing is claimed right now.</strong> Every open row on the board is free to pick up.
       </div>`;
@@ -385,10 +553,10 @@ export function renderClaims(d, now = Date.now(), edgeTtlSeconds = 60) {
  */
 const CLAIM_SUFFIX = {
   compliant: "",
-  non_compliant: " · no live claim",
-  not_measured: " · not gated",
-  pending: " · checking",
-  unknown: " · unknown",
+  non_compliant: "no live claim",
+  not_measured: "not gated",
+  pending: "checking",
+  unknown: "unknown",
 };
 
 /** The open PRs, prs.bounded.tools (#480/#713): newest first, per repo. */
@@ -396,17 +564,25 @@ export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
   const description =
     "Every open pull request in the org's public repos — changes awaiting a check, projected from the same board as the desk.";
   const c = d.compliance;
+  // NO RANK SLOT HERE ANY MORE. It printed `#1088` while the where-line printed
+  // `prx · 1088` — the same number twice on every row, one of them stripped of
+  // the repo that gives it meaning. The where-line is the one that survives,
+  // and dropping the marker costs no row height because the row is a grid whose
+  // first track collapses when the board is not railed.
   const list = d.items.length
-    ? d.items
-        .map((i) =>
-          row(
-            `#${i.number}`,
-            i.title,
-            i.url,
-            `${shortRepo(i.repo)}${CLAIM_SUFFIX[i.claim] ?? CLAIM_SUFFIX.unknown}`,
-          ),
-        )
-        .join("\n      ")
+    ? board(
+        d.items.map((i) =>
+          row({
+            marker: null,
+            title: i.title,
+            url: i.url,
+            repo: i.repo,
+            number: i.number,
+            noun: "pull request",
+            suffix: CLAIM_SUFFIX[i.claim] ?? CLAIM_SUFFIX.unknown,
+          }),
+        ),
+      )
     : `<div class="stamp"><strong>No open pull requests.</strong> The backlog is drained.</div>`;
 
   // THE TILE THAT USED TO BE HERE COULD NOT BE NON-ZERO (#15). It counted the
@@ -460,10 +636,18 @@ export function renderPrs(d, now = Date.now(), edgeTtlSeconds = 60) {
 
 // ── desk.bounded.tools ───────────────────────────────────────────────────────
 
+// `markerLabel` and `noun` are what the rank slot and the where-line MEAN on
+// each section, spelled out for assistive tech. They differ per section and the
+// row cannot guess them: the same position holds a board score under Issues, a
+// status under Claims and a PR number under PRs, which is precisely why the row
+// takes them as arguments rather than inferring one.
 const SECTION_COPY = {
-  issues: { title: "Issues", label: "claimable", blurb: "what is worth picking up, ranked by the board" },
-  claims: { title: "Claims", label: "claimed", blurb: "what is already spoken for" },
-  prs: { title: "PRs", label: "open", blurb: "changes awaiting a check" },
+  issues: { title: "Issues", label: "claimable", blurb: "what is worth picking up, ranked by the board",
+    markerLabel: "Board score", noun: "issue" },
+  claims: { title: "Claims", label: "claimed", blurb: "what is already spoken for",
+    markerLabel: "Status", noun: "issue" },
+  prs: { title: "PRs", label: "open", blurb: "changes awaiting a check",
+    markerLabel: "Pull request", noun: "pull request" },
 };
 
 const EMPTY_COPY = {
@@ -473,10 +657,12 @@ const EMPTY_COPY = {
 };
 
 function overviewSection(s) {
-  const copy = SECTION_COPY[s.key] || { title: s.key, label: "", blurb: "" };
+  const copy = SECTION_COPY[s.key] || { title: s.key, label: "", blurb: "", markerLabel: "", noun: "item" };
+  // The heading carries the id the <section> points at, so each section is a
+  // NAMED landmark rather than three anonymous regions a reader has to count.
   const heading = `<div class="sec__head">
-        <h2><a href="https://${esc(s.host)}">${esc(copy.title)}</a></h2>
-        <span class="sec__n">${s.ok ? `${esc(s.count)} ${esc(copy.label)}` : "unreadable"}</span>
+        <h2 id="${esc(s.key)}-h"><a href="https://${esc(s.host)}">${esc(copy.title)}</a></h2>
+        <p class="sec__n">${s.ok ? `${esc(s.count)} ${esc(copy.label)}` : "unreadable"}</p>
       </div>`;
 
   // A section that could not be read keeps its slot and says why. The
@@ -484,7 +670,7 @@ function overviewSection(s) {
   // concludes there is no work when what actually happened is that nobody could
   // tell. "Nothing" and "not known" are different sentences here too.
   if (!s.ok) {
-    return `<section class="sec" id="${esc(s.key)}">
+    return `<section class="sec" id="${esc(s.key)}" aria-labelledby="${esc(s.key)}-h">
       ${heading}
       <div class="stamp stamp--stale">
         <strong>This section could not be read.</strong> It is not empty — the feed behind
@@ -495,10 +681,27 @@ function overviewSection(s) {
     </section>`;
   }
 
+  // RAILED ON ALL THREE, including the section whose rows carry no marker. The
+  // public claims feed does not publish a status, so those rows render no marker
+  // at all — and measured on the live page that put their titles at 20px while
+  // the issues and prs titles sat at 90px, a 70px discontinuity down a page
+  // built to be read in one pass. The board reserves the track; the row still
+  // emits nothing into it.
   const body = s.items.length
-    ? s.items
-        .map((i) => row(i.note, i.title, i.url, `${shortRepo(i.repo)} · ${i.number}`))
-        .join("\n      ")
+    ? board(
+        s.items.map((i) =>
+          row({
+            marker: i.note ?? null,
+            markerLabel: copy.markerLabel,
+            title: i.title,
+            url: i.url,
+            repo: i.repo,
+            number: i.number,
+            noun: copy.noun,
+          }),
+        ),
+        true,
+      )
     : `<div class="stamp"><strong>${esc(EMPTY_COPY[s.key] || "Nothing here.")}</strong></div>`;
 
   // Never a silent head: if the section shows fewer rows than it counted, it
@@ -511,7 +714,7 @@ function overviewSection(s) {
       ? `<p class="muted sec__more">Showing the first ${esc(s.items.length)} of ${esc(s.count)} — the rest are at <a href="https://${esc(s.host)}">${esc(s.host)}</a>.</p>`
       : `<p class="muted sec__more">All of them, in full, at <a href="https://${esc(s.host)}">${esc(s.host)}</a>.</p>`;
 
-  return `<section class="sec" id="${esc(s.key)}">
+  return `<section class="sec" id="${esc(s.key)}" aria-labelledby="${esc(s.key)}-h">
       ${heading}
       <p class="muted">${esc(copy.blurb)}</p>
       ${body}

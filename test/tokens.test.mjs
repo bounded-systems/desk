@@ -12,7 +12,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import * as tokens from "../src/tokens.js";
 import { LIGHT, DARK, UNPINNED, vars } from "../src/palette.js";
-import { PINS, resolvePins } from "../scripts/make-tokens.mjs";
+import { SCALE, UNPINNED as SCALE_UNPINNED } from "../src/scale.js";
+import { PINS, DIMENSIONS, resolvePins, resolveDimensions } from "../scripts/make-tokens.mjs";
 
 /**
  * Comments only. A hex inside prose is fine and there is a lot of prose here —
@@ -33,6 +34,9 @@ const stripComments = (s) =>
     .join("\n");
 
 const HEX = /#[0-9a-fA-F]{3}\b|#[0-9a-fA-F]{6}\b/g;
+
+/** CSS comments only — the stylesheet explains its own values at length. */
+const stripCss = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "");
 
 test("no page types a colour — every hex comes from palette.js", async () => {
   // The state before this change: sixteen literals across these two files, of
@@ -137,5 +141,133 @@ test("the stated gaps really are gaps", async (t) => {
   assert.ok(brand.size > 19, `only ${brand.size} brand colours found — the scan has narrowed`);
   for (const [role, value] of Object.entries(UNPINNED)) {
     assert.ok(!brand.has(value.toUpperCase()), `${role} ${value} is a brand colour after all — pin it`);
+  }
+});
+
+// ── The dimensions, on the same two tiers (desk#61) ─────────────────────────
+//
+// Colour was never the only axis desk typed by hand. `min-height:44px` on the
+// notify button IS `control.md`, transcribed, beside a comment re-deriving the
+// WCAG rationale the token already documents — the identical failure this file
+// exists to catch, one axis over, and nothing was watching it. Same shape as
+// above: the half that catches the regression (a literal creeping back into a
+// page) runs everywhere; the package comparison is the extra an installed
+// environment can afford.
+
+/** The stylesheet the Worker actually serves, extracted from the real render. */
+const style = async () => {
+  const { renderIssues } = await import("../src/render.js");
+  const html = renderIssues(
+    { generated_at: "2026-08-25T12:00:00Z", limit: 25, withheld: {}, items: [] },
+    Date.parse("2026-08-25T12:30:00Z"),
+    60,
+  );
+  return /<style>([\s\S]*?)<\/style>/.exec(html)[1];
+};
+
+test("no page types a dimension — every size, radius and control floor is a var", async () => {
+  const css = stripCss(await style());
+  // PIN THE FLOOR FIRST, the way "the stated gaps really are gaps" does. A
+  // renamed constant or a changed extraction would otherwise hand every
+  // assertion below an empty string and print a clean result.
+  assert.ok(css.length > 2000, `only ${css.length} bytes of CSS extracted — the scan has narrowed`);
+  for (const prop of ["font-size", "border-radius", "min-height", "min-width"]) {
+    for (const m of css.matchAll(new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;}]+)`, "g"))) {
+      assert.match(
+        m[1].trim(),
+        /var\(--/,
+        `${prop}: ${m[1].trim()} is typed rather than taken from src/scale.js`,
+      );
+    }
+  }
+  // The body font shorthand carries the base size too, and a shorthand hides
+  // from the loop above.
+  assert.match(css, /font:\s*var\(--text-body\)/);
+});
+
+test("the scale accounts for every dimension, pinned or not", () => {
+  const pinned = new Set(Object.keys(DIMENSIONS).map((n) => tokens[n]));
+  const gaps = new Set(Object.values(SCALE_UNPINNED));
+  for (const [role, v] of Object.entries(SCALE)) {
+    assert.ok(pinned.has(v) || gaps.has(v), `--${role}: ${v} is neither a brand token nor a stated gap`);
+  }
+  // Both directions, for the reason the palette's version records: a stated gap
+  // nothing uses is a note arguing against a pin that may by now exist, and a
+  // PIN nothing uses is the same staleness from the other side — a value the
+  // repo claims to consume from the design system and does not.
+  for (const v of gaps) {
+    assert.ok(Object.values(SCALE).includes(v), `${v} is listed as a gap but nothing uses it`);
+  }
+  for (const name of Object.keys(DIMENSIONS)) {
+    assert.ok(
+      Object.values(SCALE).includes(tokens[name]),
+      `${name} (${DIMENSIONS[name]}) is pinned but nothing consumes it`,
+    );
+  }
+});
+
+test("every custom property the stylesheet reads is one the stylesheet defines", async () => {
+  // The failure this caught while it was being written: `--space-10` was used in
+  // two rules and defined nowhere, so `margin-top` silently computed to nothing.
+  // An undefined custom property is not an error anywhere — not in the browser,
+  // not in a build, not in any other test here — it is just a declaration that
+  // quietly does not apply.
+  const css = await style();
+  const defined = new Set([
+    ...Object.keys(LIGHT).map((k) => `--${k}`),
+    ...Object.keys(SCALE).map((k) => `--${k}`),
+  ]);
+  const used = new Set([...css.matchAll(/var\((--[a-z0-9-]+)\)/g)].map((m) => m[1]));
+  assert.ok(used.size > 20, `only ${used.size} custom properties read — the scan has narrowed`);
+  for (const u of used) assert.ok(defined.has(u), `${u} is read by the stylesheet and defined nowhere`);
+  for (const d of defined) assert.ok(used.has(d), `${d} is defined and never read`);
+});
+
+test("the generated module says which token each dimension came from", () => {
+  assert.deepEqual(Object.keys(tokens.DIMENSION_PATHS), Object.keys(DIMENSIONS));
+  for (const [name, path] of Object.entries(DIMENSIONS)) {
+    assert.equal(tokens.DIMENSION_PATHS[name], path);
+    assert.match(tokens[name], /^[\d.]+(rem|px)$/, `${name} is not a plain dimension`);
+    // The semantic tiers, never `primitive.font-size-13`: primitives are the raw
+    // ramp the roles alias, and consuming one directly opts out of exactly the
+    // indirection the design system provides.
+    assert.match(path, /^(size|radius|space|control)\./, `${path} must be a semantic role`);
+  }
+});
+
+test("the committed dimensions still match @bounded-systems/brand", async (t) => {
+  let dims;
+  try {
+    dims = await resolveDimensions();
+  } catch {
+    return t.skip("@bounded-systems/brand is not installed");
+  }
+  for (const [name, { path, value }] of Object.entries(dims)) {
+    assert.equal(tokens[name], value, `${name} (${path}) has drifted — run \`npm run tokens\``);
+  }
+});
+
+test("the stated dimension gaps really are gaps", async (t) => {
+  // The falsifiable half of scale.js's claim: that none of them is a brand
+  // dimension someone missed. It cannot check the judgement calls — that a 3.2px
+  // focus radius has no home on an 8/12/18 ramp, or that a rem gutter is right
+  // where brand's ramp is px. Those are arguments, written where they can be
+  // disagreed with.
+  let json;
+  try {
+    const { pkgRoot } = await import("../scripts/make-tokens.mjs");
+    json = JSON.parse(await readFile(pkgRoot() + "tokens/tokens.json", "utf8"));
+  } catch {
+    return t.skip("@bounded-systems/brand is not installed");
+  }
+  const brand = new Set();
+  for (const tier of ["primitive", "size", "radius", "space", "control"]) {
+    for (const v of Object.values(json[tier] || {})) {
+      if (v?.$type === "dimension") brand.add(String(v.$value));
+    }
+  }
+  assert.ok(brand.size > 25, `only ${brand.size} brand dimensions found — the scan has narrowed`);
+  for (const [role, value] of Object.entries(SCALE_UNPINNED)) {
+    assert.ok(!brand.has(value), `${role} ${value} is a brand dimension after all — pin it`);
   }
 });

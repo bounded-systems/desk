@@ -1,0 +1,138 @@
+{
+  "_source": "Captured from https://desk.bounded.tools/board.json on 2026-08-30T22:57Z; the projection's own generated_at is 2026-08-30T22:55:19Z. Real rows, real titles, real SHAs — recorded EVIDENCE, not a fixture written to make a test pass. Re-capture it and the assertions must still hold; if they stop holding, the page changed.",
+  "ok": true,
+  "generated_at": "2026-08-30T22:55:19Z",
+  "head": 5,
+  "sections": [
+    {
+      "key": "issues",
+      "host": "issues.bounded.tools",
+      "ok": true,
+      "count": 233,
+      "shown": 25,
+      "items": [
+        {
+          "repo": "bounded-systems/prx",
+          "number": 434,
+          "title": "Cut the signing release (consume accumulated changesets) + add `PRX_PROVENANCE_KEY` repo secret",
+          "url": "https://github.com/bounded-systems/prx/issues/434",
+          "note": "17.30"
+        },
+        {
+          "repo": "bounded-systems/prx",
+          "number": 215,
+          "title": "feat(prx): ephemeral push credential via GitHub App installation tokens (keeperd)",
+          "url": "https://github.com/bounded-systems/prx/issues/215",
+          "note": "16.75"
+        },
+        {
+          "repo": "bounded-systems/claude-box",
+          "number": 195,
+          "title": "credential file is protected by ACL/hook layers, not a real capability boundary (fd/memfd hand-off blocked on harness support)",
+          "url": "https://github.com/bounded-systems/claude-box/issues/195",
+          "note": "16.75"
+        },
+        {
+          "repo": "bounded-systems/prx",
+          "number": 348,
+          "title": "fix(ci): release-binary `image` (GHCR push) job fails — non-blocking but red",
+          "url": "https://github.com/bounded-systems/prx/issues/348",
+          "note": "16.52"
+        },
+        {
+          "repo": "bounded-systems/trellis",
+          "number": 2,
+          "title": "Flip keeper-wire contract-check to blocking once upstream drift is fixed",
+          "url": "https://github.com/bounded-systems/trellis/issues/2",
+          "note": "16.52"
+        }
+      ],
+      "generated_at": "2026-08-30T22:55:19Z"
+    },
+    {
+      "key": "claims",
+      "host": "claims.bounded.tools",
+      "ok": true,
+      "count": 5,
+      "shown": 5,
+      "items": [
+        {
+          "repo": "bounded-systems/.github",
+          "number": 273,
+          "title": "Standing claim: org-defaults.yml — the bootstrap pin bump lane",
+          "url": "https://github.com/bounded-systems/.github/issues/273"
+        },
+        {
+          "repo": "bounded-systems/.github",
+          "number": 274,
+          "title": "Standing claim: registry-graph.yml — the profile knowledge-graph sync lane",
+          "url": "https://github.com/bounded-systems/.github/issues/274"
+        },
+        {
+          "repo": "bounded-systems/.github",
+          "number": 278,
+          "title": "Standing claim: reroll-claude-harness — the harness baseline re-roll lane",
+          "url": "https://github.com/bounded-systems/.github/issues/278"
+        },
+        {
+          "repo": "bounded-systems/.github",
+          "number": 279,
+          "title": "Standing claim: adopt-claude-harness — the harness adoption lane",
+          "url": "https://github.com/bounded-systems/.github/issues/279"
+        },
+        {
+          "repo": "bounded-systems/.github",
+          "number": 280,
+          "title": "Standing claim: front-desk-reroll — the front-desk check-in re-roll lane",
+          "url": "https://github.com/bounded-systems/.github/issues/280"
+        }
+      ],
+      "generated_at": "2026-08-30T22:55:19Z"
+    },
+    {
+      "key": "prs",
+      "host": "prs.bounded.tools",
+      "ok": true,
+      "count": 6,
+      "shown": 6,
+      "items": [
+        {
+          "repo": "bounded-systems/prx",
+          "number": 1088,
+          "title": "chore(deps): bump bounded-systems/.github/.github/workflows/_pr-claim.yml from 8a56f22f32bd007affbef503a4f1ac736c9aa52d to d5da3d12bdb0e04b09a63d6a58b266a2e48ca508",
+          "url": "https://github.com/bounded-systems/prx/pull/1088",
+          "note": "#1088"
+        },
+        {
+          "repo": "bounded-systems/prx",
+          "number": 1087,
+          "title": "chore(deps): bump bounded-systems/.github/.github/actions/broker-gh-token from d1b25e3bb48ba919f2af0f1ab83063a1d76d88d4 to d5da3d12bdb0e04b09a63d6a58b266a2e48ca508",
+          "url": "https://github.com/bounded-systems/prx/pull/1087",
+          "note": "#1087"
+        },
+        {
+          "repo": "bounded-systems/prx",
+          "number": 1086,
+          "title": "chore(deps): bump bounded-systems/.github/.github/workflows/_claim-sweep.yml from 14c1a9b3ade8bb6416f46c890eda21823647da09 to d126d721fa50275e12af0bdeaf1a2ff3016eedfd",
+          "url": "https://github.com/bounded-systems/prx/pull/1086",
+          "note": "#1086"
+        },
+        {
+          "repo": "bounded-systems/prx",
+          "number": 1085,
+          "title": "chore(deps): bump bounded-systems/.github/.github/workflows/repo-standard.yml from d43c3280588ef05f4ead43426db1091d4cb8f520 to d5da3d12bdb0e04b09a63d6a58b266a2e48ca508",
+          "url": "https://github.com/bounded-systems/prx/pull/1085",
+          "note": "#1085"
+        },
+        {
+          "repo": "bounded-systems/prx",
+          "number": 1084,
+          "title": "chore(deps): bump the github-actions group with 3 updates",
+          "url": "https://github.com/bounded-systems/prx/pull/1084",
+          "note": "#1084"
+        }
+      ],
+      "generated_at": "2026-08-30T22:55:19Z"
+    }
+  ]
+}
