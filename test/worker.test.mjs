@@ -8,6 +8,7 @@ import { issuer } from "./oidc-fixture.mjs";
 import { b64url } from "../src/push.js";
 import { listSubscriptions } from "../src/subscriptions.js";
 import { FOREST } from "../src/tokens.js";
+import { pendingApprovals } from "../src/pending.js";
 
 const BOARD = {
   feed: "front-desk-public",
@@ -749,11 +750,14 @@ test("it is RECORDED BEFORE it is sent", async () => {
   globalThis.fetch = async (url) => {
     const href = typeof url === "string" ? url : url.url;
     if (href.includes("/.well-known/jwks")) return new Response(JSON.stringify({ keys: ISS.jwks }), { status: 200 });
-    pendingAtPushTime = await env.SUBSCRIPTIONS.get("pending:approval");
+    // Read through the module rather than a hardcoded key: #65 moved storage
+    // from one slot to one entry per ceremony, and a test that pins the layout
+    // fails on a refactor that keeps the invariant it actually cares about.
+    pendingAtPushTime = (await pendingApprovals(env.SUBSCRIPTIONS)).length;
     return new Response(null, { status: 201 });
   };
   await approve(APPROVAL, env, "desk.bounded.tools", await ISS.mint());
-  assert.ok(pendingAtPushTime, "the record must exist before the push leaves");
+  assert.equal(pendingAtPushTime, 1, "the record must exist before the push leaves");
 });
 
 test("an unauthorized caller records nothing and sends nothing", async () => {
