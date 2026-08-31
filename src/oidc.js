@@ -66,6 +66,19 @@ export const NOTIFY_WORKFLOW_REFS = [
   // Each is pinned to `refs/heads/main` for the same reason as the two above: a
   // branch or a fork mints a token with a different ref, so opening a PR against
   // infra cannot reach this endpoint.
+  // The announce lane (.github#305). NOT a ceremony lane — it opens nothing and
+  // approves nothing. It exists because a SESSION cannot reach this endpoint: a
+  // session holds no Actions OIDC token, so `claim-ceremony.mjs` had no way to
+  // tell a phone that the ceremony it just opened is waiting. Every claim
+  // ceremony asks for a tap; none of them could ring. This lane is the one that
+  // rings for them.
+  //
+  // Its inputs come from a session, which is the thing to look at twice — and
+  // `validateApproval` is what makes it safe rather than anything here: the
+  // notice's URL must be an https keeper.bounded.tools address, so a caller can
+  // say THAT an approval is waiting and point at the keeper, and can point
+  // nowhere else.
+  "bounded-systems/.github/.github/workflows/announce-ceremony.yml@refs/heads/main",
   "bounded-systems/infra/.github/workflows/boot-deploy.yml@refs/heads/main",
   "bounded-systems/infra/.github/workflows/broker-deploy.yml@refs/heads/main",
   "bounded-systems/infra/.github/workflows/create-app.yml@refs/heads/main",

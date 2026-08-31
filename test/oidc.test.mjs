@@ -19,7 +19,7 @@ test("EVERY pinned lane is accepted, not just the first", async () => {
   // rather than naming a ref: adding an entry adds a case here for free, and a
   // typo in one is a red test rather than a silent hole.
   const iss = await issuer();
-  assert.ok(NOTIFY_WORKFLOW_REFS.length >= 9, "the projection, desk deploy, and infra's seven ceremony lanes");
+  assert.ok(NOTIFY_WORKFLOW_REFS.length >= 10, "the projection, desk deploy, the announce lane, and infra's seven ceremony lanes");
   for (const ref of NOTIFY_WORKFLOW_REFS) {
     const claims = await verifyNotifyCaller(await iss.mint({ workflowRef: ref }), { getJwks: iss.getJwks });
     assert.equal(claims.job_workflow_ref, ref);
