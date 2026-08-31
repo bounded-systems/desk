@@ -86,6 +86,18 @@ export const NOTIFY_WORKFLOW_REFS = [
   "bounded-systems/infra/.github/workflows/pathbase-door-deploy.yml@refs/heads/main",
   "bounded-systems/infra/.github/workflows/repo-admin-apply.yml@refs/heads/main",
   "bounded-systems/infra/.github/workflows/rotate-lease-key.yml@refs/heads/main",
+
+  // The last two ceremony lanes outside infra (infra#553). Both open a keeper
+  // ceremony and both announced only via a GitHub notification issue — batched,
+  // routed wherever GitHub decides, and no use against a window that can be as
+  // short as two minutes. Measured 2026-08-31: a bounded.tools deploy ceremony
+  // opened, waited its full window, and reached no phone.
+  //
+  // These two are why the general claim was false. "A ceremony tells you it is
+  // waiting" held for nine lanes out of eleven, and a guarantee with unmarked
+  // exceptions is the thing this org spends its effort removing.
+  "bounded-systems/bounded.tools/.github/workflows/deploy.yml@refs/heads/main",
+  "bounded-systems/front-desk-scheduler/.github/workflows/lease-deploy.yml@refs/heads/main",
 ];
 
 /** Kept for callers that want the projection specifically. */
