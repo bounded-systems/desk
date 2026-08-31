@@ -117,8 +117,12 @@ jobs:
       #
       # NON-FATAL. The deploy's gate is the Face ID, not the notification; a
       # push that cannot be sent must not stop a human who is already looking at
-      # the run. It also 404s on any Worker deployed before #51, which is
-      # exactly the deploy that ships this step.
+      # the run. A Worker deployed before #51 has no /approval route, which is
+      # exactly the deploy that ships this step — and it answers 405, not 404:
+      # this router falls through to `method not allowed` for any path it does
+      # not match. Measured against the live Worker, which answers 405 to a POST
+      # at an unknown path and 401 at /approval. 404 is kept below only so a
+      # moved host reads as "not available" rather than as a fault here.
       - name: Notify subscribed devices that an approval is waiting
         env:
           APPROVE_URL: ${{ steps.ceremony.outputs.approve_url }}
@@ -147,7 +151,7 @@ jobs:
                     -d "$payload" https://desk.bounded.tools/approval || true)"
           case "$code" in
             200) summary "$(jq -r '"Approval notice: sent \(.sent)/\(.total) — pruned \(.pruned), failed \(.failed)"' /tmp/appr.json)" ;;
-            404|503) summary "Approval notice: not available on the deployed Worker yet (HTTP $code)." ;;
+            404|405|503) summary "Approval notice: not available on the deployed Worker yet (HTTP $code)." ;;
             *)   echo "::warning::desk /approval answered ${code:-no response}"
                  summary "Approval notice: **failed** — desk answered ${code:-no response}." ;;
           esac
