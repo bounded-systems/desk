@@ -45,6 +45,7 @@ import {
   renderOverview,
   renderUnavailable,
   renderOffline,
+  renderHuman,
 } from "./render.js";
 import { validateSubscription, putSubscription } from "./subscriptions.js";
 import { notifyAll } from "./notify.js";
@@ -53,6 +54,16 @@ import { verifyNotifyCaller } from "./oidc.js";
 import { AVATAR_SVG, ICON_PNGS, iconBytes } from "./icons.js";
 import { FOREST } from "./tokens.js";
 import { validateApproval, putApproval, pending } from "./pending.js";
+import {
+  validateQuestion,
+  putQuestion,
+  getQuestion,
+  questionViews,
+  viewOf,
+  answerQuestion,
+  mayAnswer,
+  mayList,
+} from "./questions.js";
 
 // ── The installable app (#766) ───────────────────────────────────────────────
 //
@@ -722,6 +733,162 @@ export async function handleApproval(request, env) {
   return await handleNotify(request, env);
 }
 
+/** Longest question worth reading. Its own constant: /approval hardcodes 4096
+ * and /subscribe names its own, so there is no shared limit to inherit — and a
+ * prompt plus a choice set is a different budget from a push subscription. */
+const MAX_QUESTION_BODY = 4096;
+
+/**
+ * `/human`, `/human.json`, `/human/<id>`, `/human/<id>.json` — and nothing else.
+ *
+ * Every other route in this Worker is a pathname EQUALITY, which a question
+ * address cannot be: the id is in the path. So this is the one match that has
+ * to be a regex, and it is anchored at both ends and restricted to the minted
+ * id charset so it can never swallow `/human` itself, `/human/<id>/answer`, or
+ * a path added later.
+ */
+const RE_HUMAN = /^\/human(?:\/([A-Za-z0-9_-]{1,64}))?(\.json)?$/;
+function matchHuman(pathname) {
+  const m = RE_HUMAN.exec(pathname);
+  return m ? { id: m[1] ?? null, json: Boolean(m[2]) } : null;
+}
+
+/** The answer route. Separate pattern, so `/human/<id>` cannot reach it. */
+const RE_HUMAN_ANSWER = /^\/human\/([A-Za-z0-9_-]{1,64})\/answer$/;
+
+/**
+ * Ask a person something, and exit (#69).
+ *
+ * Same OIDC door as /approval and /notify — the caller is a pinned lane, not a
+ * secret — and deliberately NOT the same rung. An approval names a ceremony a
+ * keyholder completes; this names a question, and what comes back is
+ * information. Nothing here is spendable as an authorization.
+ *
+ * WHY THIS DOES NOT SIMPLY `return handleNotify(...)` THE WAY /approval DOES.
+ * The caller needs the id and the address a person will answer at, and those
+ * are not in the fan-out census. And a push that could not leave does not
+ * un-ask the question: the record is already durable by then, so a VAPID
+ * misconfiguration is reported as a field rather than as this route's status,
+ * which would tell the lane its question was refused when it was not.
+ */
+export async function handleQuestion(request, env) {
+  const no = (status, error) =>
+    new Response(JSON.stringify({ error }) + "\n", {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    });
+
+  if (!env.SUBSCRIPTIONS) return no(503, "no subscription store is configured on this deployment");
+
+  const auth = request.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return no(401, "an Actions OIDC bearer token is required");
+  try {
+    await verifyNotifyCaller(token);
+  } catch (e) {
+    return no(403, `caller not authorized: ${e.message}`);
+  }
+
+  const body = await request.text();
+  if (body.length > MAX_QUESTION_BODY) return no(413, "question too large");
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return no(400, "body is not JSON");
+  }
+  const checked = validateQuestion(parsed);
+  if (!checked.ok) return no(400, checked.error);
+
+  // RECORD BEFORE SENDING, for the same reason /approval does: a push whose
+  // /pending is still empty tells the reader the board changed.
+  const rec = await putQuestion(env.SUBSCRIPTIONS, checked.value);
+
+  const fan = await handleNotify(request, env);
+  const census = await fan.json();
+  return new Response(
+    JSON.stringify(
+      {
+        id: rec.id,
+        url: rec.url,
+        deadline: rec.deadline,
+        no_answer_policy: rec.no_answer_policy,
+        // Reported, not conflated: the question is on file either way.
+        notified: fan.status === 200 ? census : { error: census.error, status: fan.status },
+      },
+      null,
+      2,
+    ) + "\n",
+    { status: 201, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } },
+  );
+}
+
+/**
+ * Record a person's answer — REFUSED UNTIL DESK LOGIN LANDS (desk#65).
+ *
+ * The seam is `mayAnswer`, one named predicate in questions.js, and it is
+ * consulted BEFORE the body is read: a door that is shut should not be able to
+ * store anything a caller sent it, even by accident. 501 rather than 401,
+ * because 401 invites a caller to present a credential and there is none to
+ * present — the capability does not exist yet on any deployment.
+ *
+ * Everything below the seam is real and unit-tested (`answerQuestion`); it is
+ * wired here so that landing desk#65 is a change to `mayAnswer` and nothing
+ * else.
+ */
+export async function handleAnswer(request, env, id) {
+  const no = (status, error) =>
+    new Response(JSON.stringify({ error }) + "\n", {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    });
+
+  if (!env.SUBSCRIPTIONS) return no(503, "no subscription store is configured on this deployment");
+
+  const may = mayAnswer(request, env);
+  if (!may.ok) return no(501, may.reason);
+
+  const body = await request.text();
+  if (body.length > MAX_QUESTION_BODY) return no(413, "answer too large");
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return no(400, "body is not JSON");
+  }
+  const done = await answerQuestion(env.SUBSCRIPTIONS, id, parsed);
+  if (!done.ok) return no(done.status, done.error);
+  return json(done.value, 200, 0);
+}
+
+/**
+ * THE ONE JUDGEMENT behind both /human renderings.
+ *
+ * A person and an agent must never be able to disagree about whether a question
+ * was answered or what the answer was, so there is one selection here and the
+ * fork is at the return — the same shape the board's `wantsJson` fork has had
+ * since #7. There is no agent-only store and no second read path.
+ */
+async function selectHuman(request, env, id, now) {
+  const kv = env.SUBSCRIPTIONS;
+  if (!kv) return { status: 503, value: { error: "no question store is configured on this deployment" } };
+  if (id) {
+    const rec = await getQuestion(kv, id);
+    // 404 rather than an empty card: "answered", "unanswered" and "there is no
+    // such question" are three different sentences.
+    if (!rec) return { status: 404, value: { error: "no such question" } };
+    return { status: 200, value: viewOf(rec, now) };
+  }
+  // The COLLECTION, on a public surface with no login (desk#65) — see `mayList`.
+  // 501 and not an empty list: "you may not read this" and "there are none" are
+  // different facts, and answering 200 with `questions: []` would state the
+  // second while the first is what is true. Refused before the store is
+  // touched, so a caller who may not read the corpus cannot make us page it.
+  const may = mayList(request, env);
+  if (!may.ok) return { status: 501, value: { kind: "closed", error: may.reason } };
+  return { status: 200, value: { kind: "questions", questions: await questionViews(kv, now) } };
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -757,6 +924,27 @@ export default {
         return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
       }
       return await handleNotify(request, env);
+    }
+
+    // Ask a person something and exit (#69). Same door as /notify, and the same
+    // surface rule for the same reason: the three static hosts serve no question
+    // and have no person attached to them.
+    if (url.pathname === "/human" && request.method === "POST") {
+      if (surfaceFor(url.hostname, env) !== "overview") {
+        return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
+      }
+      return await handleQuestion(request, env);
+    }
+
+    // Answer one (#69). A DIFFERENT door — see `mayAnswer` in questions.js —
+    // and shut until desk login lands (desk#65). The surface check comes first
+    // anyway, so a wrong-host caller learns nothing about either.
+    const answering = request.method === "POST" ? RE_HUMAN_ANSWER.exec(url.pathname) : null;
+    if (answering) {
+      if (surfaceFor(url.hostname, env) !== "overview") {
+        return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
+      }
+      return await handleAnswer(request, env, answering[1]);
     }
 
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -860,6 +1048,20 @@ export default {
       if (url.pathname === "/pending") {
         return json(await pending(env.SUBSCRIPTIONS), 200, 0);
       }
+      // A question, or all of them (#69) — ONE selection, two renderings.
+      //
+      // ttl 0, like /pending above and for a sharper reason: a card cached for
+      // EDGE_TTL keeps saying "waiting for a person" for a minute after a person
+      // answered, and a human and an agent reading the same question a second
+      // apart would then disagree about it. That is the one thing this route
+      // must never allow.
+      const human = matchHuman(url.pathname);
+      if (human) {
+        const sel = await selectHuman(request, env, human.id, Date.now());
+        return human.json
+          ? json(sel.value, sel.status, 0)
+          : html(renderHuman(sel.value), sel.status, 0);
+      }
       if (url.pathname === "/sw.js") {
         return new Response(SERVICE_WORKER, {
           headers: {
@@ -888,7 +1090,16 @@ export default {
     // than a 404 — a check that only looks at the status reads the asset as
     // present". A browser asked to install from issues.bounded.tools would parse
     // a page as a manifest.
-    if (/^\/(manifest\.webmanifest|sw\.js|notify\.js|offline|icon\.svg|icon-(200|460|1024)\.png|apple-touch-icon(-precomposed)?\.png)$/.test(url.pathname)) {
+    //
+    // The /human paths join the list (#69), and they are matched by shape rather
+    // than by name because a question address carries an id. Without this a
+    // question URL would have three impostor resolutions — issues, claims and
+    // prs would each answer 200 with their own board for it, which is the
+    // wrong-content-type 200 above and a phishing-shaped one besides.
+    if (
+      matchHuman(url.pathname) ||
+      /^\/(manifest\.webmanifest|sw\.js|notify\.js|offline|icon\.svg|icon-(200|460|1024)\.png|apple-touch-icon(-precomposed)?\.png)$/.test(url.pathname)
+    ) {
       return new Response("not found\n", {
         status: 404,
         headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },

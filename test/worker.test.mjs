@@ -9,6 +9,7 @@ import { b64url } from "../src/push.js";
 import { listSubscriptions } from "../src/subscriptions.js";
 import { FOREST } from "../src/tokens.js";
 import { pendingApprovals } from "../src/pending.js";
+import { questionIdFrom, questionUrlFor } from "../src/questions.js";
 
 const BOARD = {
   feed: "front-desk-public",
@@ -54,21 +55,34 @@ const TEST_VAPID_PUBLIC = "BExampleTestPublicKeyValue";
 /** A KV stand-in, per test, so one test's subscriptions never reach another's. */
 const kvStub = () => {
   const map = new Map();
+  // What each request COSTS. /pending and /human are unauthenticated, so the
+  // number of reads an anonymous caller can provoke is a property under test,
+  // not an implementation detail.
+  const counts = { get: 0, list: 0, put: 0, delete: 0 };
   return {
     map,
+    counts,
     // The options bag matters: putApproval passes expirationTtl, and a stub that
     // drops it would let a record outlive the ceremony it describes.
-    put: async (k, v, _opts) => void map.set(k, v),
-    get: async (k) => map.get(k) ?? null,
-    delete: async (k) => void map.delete(k),
+    put: async (k, v, _opts) => { counts.put++; map.set(k, v); },
+    get: async (k) => { counts.get++; return map.get(k) ?? null; },
+    delete: async (k) => { counts.delete++; map.delete(k); },
     // HONOUR THE PREFIX, as real KV does. A stub that ignores it returned
     // `pending:approval` as if it were a subscription, and the fan-out then tried
     // to parse "undefined" as a push endpoint. The store holds more than one kind
     // of record now, so the filter is load-bearing rather than decorative.
-    list: async ({ prefix = "" } = {}) => ({
-      keys: [...map.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })),
-      list_complete: true,
-    }),
+    //
+    // AND SORT, as real KV does: the askable-set keys carry `asked_at` and are
+    // read in listing order, so a stub that returned insertion order would let
+    // an ordering bug through by handing back the order the test happened to
+    // write in.
+    list: async ({ prefix = "" } = {}) => {
+      counts.list++;
+      return {
+        keys: [...map.keys()].filter((k) => k.startsWith(prefix)).sort().map((name) => ({ name })),
+        list_complete: true,
+      };
+    },
   };
 };
 const KEYED_ENV = { ...ENV, VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC, SUBSCRIPTIONS: kvStub() };
@@ -891,4 +905,402 @@ test("the worker caches ONE page and intercepts only navigations", async () => {
   assert.match(code, /"\/offline"/);
   assert.match(code, /mode !== "navigate"/, "everything else goes to the network");
   assert.ok(!/board\.json/.test(code), "the board is never cached");
+});
+
+// ── /human: a question in front of a person (#69) ────────────────────────────
+//
+// The verb is ask-and-exit, so the two halves are tested apart: a lane may ASK
+// through the OIDC door, and nobody may ANSWER through it — or through any
+// other door — until desk login lands (desk#65).
+
+const ASK = {
+  prompt: "Should the intake lane keep opening one issue per repo?",
+  choices: ["yes", "no"],
+  no_answer_policy: "default",
+  no_answer_value: "no",
+};
+
+const ask = (body, env, host = "desk.bounded.tools", token = null) =>
+  worker.fetch(new Request(`https://${host}/human`, {
+    method: "POST",
+    headers: token ? { authorization: `Bearer ${token}`, "content-type": "application/json" }
+                   : { "content-type": "application/json" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  }), env);
+
+/** The rendered state, extracted from the element — not matched across the page. */
+const stateOf = (html) => (html.match(/q__state" data-status="([a-z-]+)"/) || [])[1];
+
+/**
+ * What the CARD SAYS, as opposed to what its data attribute reports.
+ *
+ * The parity test used to compare `data-status` alone, so every human-visible
+ * sentence on the card was unpinned: a fired default could announce "A person
+ * answered." while /human.json correctly reported `default-fired`, and the
+ * suite stayed green. The attribute is for machines; these two read the parts a
+ * person actually reads.
+ */
+const headOf = (html) =>
+  (html.match(/q__state" data-status="[a-z-]+">\s*<strong>([^<]*)<\/strong>/) || [])[1];
+/** The value line: its label, the value itself, and who it is attributed to. */
+const valueOf = (html) => {
+  const m = html.match(
+    /<p class="q__value"><span class="visually-hidden">([^<]*)<\/span><span class="q__value-t">([^<]*)<\/span>\s*<span class="muted"> — ([^<]*)<\/span>/,
+  );
+  return m ? { label: m[1].trim(), value: m[2], attribution: m[3].trim() } : null;
+};
+
+/** One sentence per state, and no state may borrow another's. */
+const HEADS = {
+  open: "Waiting for a person.",
+  answered: "A person answered.",
+  "default-fired": "Nobody answered. The declared default fired.",
+  blocked: "Nobody answered, and the asker declared block.",
+  escalated: "Nobody answered, and the asker declared escalate.",
+};
+
+/**
+ * Put one record straight in the store, to reach a state the CLOCK owns.
+ *
+ * The deadline is relative to now, not a literal: a fixed date drifts into the
+ * past and turns an "open" fixture into an expired one, which here would flip
+ * the very distinction under test rather than failing loudly.
+ */
+const ago = (days) => new Date(Date.now() - days * 86400000).toISOString();
+const ahead = (days) => new Date(Date.now() + days * 86400000).toISOString();
+const seedQuestion = async (env, rec) => {
+  const full = {
+    choices: null, no_answer_policy: "block", no_answer_value: null, answer: null,
+    url: questionUrlFor(rec.id), asked_at: ago(9), deadline: ago(2), ...rec,
+  };
+  await env.SUBSCRIPTIONS.put(`question:${rec.id}`, JSON.stringify(full));
+  // BOTH keys, because putQuestion writes both: a helper that seeded only the
+  // record would make /pending look broken here and, worse, could make a real
+  // regression in the pointer write invisible.
+  //
+  // ONLY WHILE IT IS STILL ASKABLE. The pointer's TTL is the answering window,
+  // so KV has already dropped it for a question past its deadline; the stub has
+  // no expiry, so the deadline stands in for it here.
+  if (Date.parse(full.deadline) > Date.now()) {
+    await env.SUBSCRIPTIONS.put(`open-question:${full.asked_at}:${rec.id}`, "");
+  }
+};
+
+test("a lane asks, and gets back the id and the address a person answers at", async () => {
+  const env = await vapidEnv();
+  await seed(env, "a");
+  stubOidcAndPush();
+  const res = await ask(ASK, env, "desk.bounded.tools", await ISS.mint());
+  assert.equal(res.status, 201);
+  const body = await res.json();
+  assert.match(body.url, /^https:\/\/desk\.bounded\.tools\/human\/[A-Za-z0-9_-]{1,64}$/);
+  assert.equal(questionIdFrom(body.url), body.id);
+  assert.equal(body.no_answer_policy, "default");
+  assert.equal(body.notified.sent, 1, "and the phone was told");
+
+  const q = await (await get("desk.bounded.tools", `/human/${body.id}.json`, env)).json();
+  assert.equal(q.kind, "question");
+  assert.equal(q.status, "open");
+  assert.equal(q.prompt, ASK.prompt);
+});
+
+test("the question is on file even when the push could not leave", async () => {
+  // A VAPID misconfiguration does not un-ask the question, and answering the
+  // lane 503 would tell it the ask was refused when it was recorded.
+  const env = { ...ENV, SUBSCRIPTIONS: kvStub() };
+  stubOidcAndPush();
+  const res = await ask(ASK, env, "desk.bounded.tools", await ISS.mint());
+  assert.equal(res.status, 201);
+  const body = await res.json();
+  assert.match(body.notified.error, /signing keypair/);
+  assert.equal((await (await get("desk.bounded.tools", `/human/${body.id}.json`, env)).json()).status, "open");
+});
+
+test("an unauthorized asker records nothing", async () => {
+  const env = await vapidEnv();
+  stubOidcAndPush();
+  assert.equal((await ask(ASK, env)).status, 401);
+  const wrong = await ISS.mint({ workflowRef: "bounded-systems/desk/.github/workflows/evil.yml@refs/heads/main" });
+  assert.equal((await ask(ASK, env, "desk.bounded.tools", wrong)).status, 403);
+  // Read the STORE, not /human.json: the corpus route is shut (desk#65), so a
+  // refusal there would pass this test no matter what the asker wrote.
+  assert.deepEqual([...env.SUBSCRIPTIONS.map.keys()].filter((k) => k.startsWith("question:")), []);
+});
+
+test("every refusal names the field, because our own lane is the caller", async () => {
+  const env = await vapidEnv();
+  stubOidcAndPush();
+  const token = await ISS.mint();
+  const err = async (body) => (await (await ask(body, env, "desk.bounded.tools", token)).json()).error;
+  assert.match(await err({ ...ASK, no_answer_policy: undefined }), /no_answer_policy/);
+  assert.match(await err({ ...ASK, prompt: "" }), /prompt/);
+  assert.match(await err({ ...ASK, no_answer_value: "maybe" }), /not one of the choices/);
+  assert.match(await err("{not json"), /not JSON/);
+  assert.equal((await ask("x".repeat(5000), env, "desk.bounded.tools", token)).status, 413);
+  // A question address the caller tried to choose is refused, not ignored.
+  assert.match(await err({ ...ASK, url: "https://keeper.bounded.tools/a/abc123" }), /desk\.bounded\.tools/);
+});
+
+test("/human exists on desk and nowhere else", async () => {
+  const env = await vapidEnv();
+  stubOidcAndPush();
+  const token = await ISS.mint();
+  for (const host of STATIC_HOSTS) {
+    assert.equal((await ask(ASK, env, host, token)).status, 404, host);
+    // AND the reads 404 rather than falling through to that host's board — a
+    // question URL with three impostor resolutions is phishing-shaped.
+    for (const path of ["/human", "/human.json", "/human/abc123", "/human/abc123.json"]) {
+      const res = await get(host, path, env);
+      assert.equal(res.status, 404, `${host}${path}`);
+      assert.ok(!/<h1>/.test(await res.text()), `${host}${path} must not serve a board`);
+    }
+  }
+});
+
+test("the method gate is not loosened by the new writes", async () => {
+  const env = await vapidEnv();
+  const res = await post("desk.bounded.tools", "/", ASK, env);
+  assert.equal(res.status, 405);
+  assert.equal(res.headers.get("allow"), "GET, HEAD");
+});
+
+// ── nobody may answer yet (desk#65) ──────────────────────────────────────────
+
+test("THE ANSWER ROUTE REFUSES, names desk#65, and stores nothing", async () => {
+  const env = await vapidEnv();
+  stubOidcAndPush();
+  const body = await (await ask(ASK, env, "desk.bounded.tools", await ISS.mint())).json();
+
+  for (const token of [null, await ISS.mint()]) {
+    const res = await worker.fetch(new Request(`https://desk.bounded.tools/human/${body.id}/answer`, {
+      method: "POST",
+      headers: token ? { authorization: `Bearer ${token}`, "content-type": "application/json" }
+                     : { "content-type": "application/json" },
+      body: JSON.stringify({ value: "yes" }),
+    }), env);
+    // 501, not 401: there is no credential to present. And an OIDC token — the
+    // door the ASK uses — must not open it, or a lane answers its own question
+    // and the record reads as human-reviewed with no human involved.
+    assert.equal(res.status, 501);
+    assert.match((await res.json()).error, /desk#65/);
+  }
+  const after = await (await get("desk.bounded.tools", `/human/${body.id}.json`, env)).json();
+  assert.equal(after.answer, null);
+  assert.equal(after.status, "open");
+});
+
+test("the card offers no control it cannot honour", async () => {
+  const env = await vapidEnv();
+  await seedQuestion(env, { id: "q1", prompt: "a question" });
+  const page = await (await get("desk.bounded.tools", "/human/q1", env)).text();
+  const body = page.slice(page.indexOf("<body>"));
+  assert.ok(!/<form/.test(body), "form-action is 'none' on every surface — a form here would be inert");
+  assert.ok(!/<button/.test(body), "a dead button is worse than none");
+  assert.match(body, /Answering is not open here yet/);
+  assert.match(body, /desk#65/);
+});
+
+// ── one judgement, two renderings (#69, rule 2) ──────────────────────────────
+
+test("A HUMAN AND AN AGENT CANNOT DISAGREE about what happened to a question", async () => {
+  const env = await vapidEnv();
+  await seedQuestion(env, { id: "open1", prompt: "still open", deadline: ahead(5) });
+  await seedQuestion(env, {
+    id: "said1", prompt: "a person said no", no_answer_policy: "default", no_answer_value: "yes",
+    answer: { value: "no", at: ago(1), rung: "human-reviewed" },
+  });
+  await seedQuestion(env, {
+    id: "fired1", prompt: "nobody said anything", no_answer_policy: "default", no_answer_value: "yes",
+  });
+  await seedQuestion(env, { id: "blocked1", prompt: "nothing proceeds", no_answer_policy: "block" });
+  await seedQuestion(env, { id: "escalated1", prompt: "goes elsewhere", no_answer_policy: "escalate" });
+
+  for (const id of ["open1", "said1", "fired1", "blocked1", "escalated1"]) {
+    const j = await (await get("desk.bounded.tools", `/human/${id}.json`, env)).json();
+    const h = await (await get("desk.bounded.tools", `/human/${id}`, env)).text();
+    assert.equal(stateOf(h), j.status, `${id}: the card and the JSON report one state`);
+
+    // THE PROSE, not only the attribute. `data-status` is for machines; a
+    // person reads the sentence, and a card whose sentence disagrees with the
+    // JSON is exactly the disagreement rule 2 forbids — it was simply invisible
+    // to a test that compared the attribute alone.
+    assert.equal(headOf(h), HEADS[j.status], `${id}: the card's sentence is the one for its state`);
+    for (const [status, head] of Object.entries(HEADS)) {
+      if (status !== j.status) assert.ok(!h.includes(head), `${id}: reads as ${status}`);
+    }
+
+    // AND THE VALUE. "A person answered no" and "nobody answered and the asker
+    // had declared yes" must not be able to render as each other, so the value
+    // the card shows and the value the JSON reports are compared as well as the
+    // state — said1 is answered "no" against a declared default of "yes"
+    // precisely so the two cannot be confused for each other here.
+    const shown = valueOf(h);
+    if (j.answer) {
+      assert.deepEqual(shown, { label: "Answer:", value: j.answer.value, attribution: "given by a person" }, id);
+    } else if (j.default_fired) {
+      assert.deepEqual(
+        shown,
+        { label: "Default:", value: j.default_value, attribution: "declared in advance, not given by anyone" },
+        id,
+      );
+    } else {
+      // block and escalate substitute NOTHING, and neither does an open
+      // question. A value line here would be a value nobody chose.
+      assert.equal(shown, null, `${id}: no value was given or declared, so none is shown`);
+      assert.equal(j.answer, null);
+      assert.equal(j.default_value, null);
+    }
+  }
+});
+
+test("'a person answered X' and 'nobody answered and the default was X' RENDER DIFFERENTLY", async () => {
+  const env = await vapidEnv();
+  await seedQuestion(env, {
+    id: "said1", prompt: "p", no_answer_policy: "default", no_answer_value: "yes",
+    answer: { value: "yes", at: ago(1), rung: "human-reviewed" },
+  });
+  await seedQuestion(env, { id: "fired1", prompt: "p", no_answer_policy: "default", no_answer_value: "yes" });
+
+  const said = await (await get("desk.bounded.tools", "/human/said1", env)).text();
+  const fired = await (await get("desk.bounded.tools", "/human/fired1", env)).text();
+  assert.equal(stateOf(said), "answered");
+  assert.equal(stateOf(fired), "default-fired");
+  // Same value, "yes", in both. Only the sentences tell them apart.
+  assert.match(said, /given by a person/);
+  assert.match(fired, /declared in advance, not given by anyone/);
+  assert.ok(!/given by a person/.test(fired), "a fired default must never read as an answer");
+
+  const j = await (await get("desk.bounded.tools", "/human/fired1.json", env)).json();
+  assert.equal(j.answer, null);
+  assert.equal(j.default_fired, true);
+  assert.equal(j.default_value, "yes");
+  assert.equal(j.rung, "unreviewed", "nobody reviewed it, so it is not human-reviewed");
+});
+
+test("an answer is never presented as an authorization", async () => {
+  const env = await vapidEnv();
+  await seedQuestion(env, {
+    id: "said1", prompt: "p", answer: { value: "yes", at: ago(1), rung: "human-reviewed" },
+  });
+  const j = await (await get("desk.bounded.tools", "/human/said1.json", env)).json();
+  assert.equal(j.rung, "human-reviewed");
+  assert.ok(!JSON.stringify(j).includes("authorized"));
+  const h = await (await get("desk.bounded.tools", "/human/said1", env)).text();
+  assert.match(h, /not an approval and authorizes nothing/);
+});
+
+test("the card is not cached stale", async () => {
+  const env = await vapidEnv();
+  await seedQuestion(env, { id: "open1", prompt: "one", deadline: ahead(5) });
+  // ttl 0, like /pending: a card cached for EDGE_TTL keeps saying "waiting for a
+  // person" for a minute after a person answered.
+  for (const path of ["/human/open1", "/human/open1.json"]) {
+    const res = await get("desk.bounded.tools", path, env);
+    assert.equal(res.status, 200, path);
+    assert.equal(res.headers.get("cache-control"), "public, max-age=0", path);
+  }
+});
+
+// ── the corpus is not public (desk#65) ───────────────────────────────────────
+//
+// desk has no login and no hostname of its own, so a collection route on it
+// published every prompt, choice set, declared default, deadline, id and
+// address a lane had ever asked, for as long as the record lived. The answer
+// door was shut on exactly the reasoning that desk login gates VIEWING; the
+// view half was not, and enumeration is the half that scales.
+test("THE WHOLE CORPUS IS NOT HANDED OUT to an unauthenticated caller", async () => {
+  const env = await vapidEnv();
+  await seedQuestion(env, {
+    id: "leak1", prompt: "Rotate the leaked deploy key now, or wait for Tuesday?",
+    choices: ["now", "tuesday"], no_answer_policy: "default", no_answer_value: "tuesday",
+    deadline: ahead(5),
+  });
+
+  for (const path of ["/human.json", "/human"]) {
+    const res = await get("desk.bounded.tools", path, env);
+    // 501, the same status and the same seam shape as the answer door: there is
+    // no credential to present, so 401 would invite one that does not exist.
+    assert.equal(res.status, 501, path);
+    const body = await res.text();
+    assert.ok(!body.includes("Rotate the leaked deploy key"), `${path} leaked the prompt`);
+    assert.ok(!body.includes("tuesday"), `${path} leaked the declared default`);
+    assert.ok(!body.includes("leak1"), `${path} leaked the id — and so the address`);
+    assert.match(body, /desk#65/, path);
+  }
+
+  // NOT "there are none". A caller told the corpus is empty stops looking; the
+  // refusal has to be distinguishable from an empty board.
+  const j = await (await get("desk.bounded.tools", "/human.json", env)).json();
+  assert.equal(j.questions, undefined);
+  assert.equal(j.kind, "closed");
+  const h = await (await get("desk.bounded.tools", "/human", env)).text();
+  assert.match(h, /not an empty list/);
+  assert.ok(!/data-status/.test(h), "no question state is reported by a page that reports no questions");
+
+  // And the one address a person was actually given still works — otherwise the
+  // notification points at a page nobody can read, and the verb is dead.
+  const one = await get("desk.bounded.tools", "/human/leak1.json", env);
+  assert.equal(one.status, 200);
+  assert.equal((await one.json()).prompt, "Rotate the leaked deploy key now, or wait for Tuesday?");
+});
+
+test("refusing the corpus does not read it — the store is not paged at all", async () => {
+  // The refusal is ahead of the store, so an anonymous caller cannot spend our
+  // KV reads on a listing they are not getting.
+  const env = await vapidEnv();
+  for (let i = 0; i < 5; i++) await seedQuestion(env, { id: `q${i}`, prompt: `p${i}` });
+  const before = { ...env.SUBSCRIPTIONS.counts };
+  await get("desk.bounded.tools", "/human.json", env);
+  assert.deepEqual(env.SUBSCRIPTIONS.counts, before, "a shut door read nothing");
+});
+
+test("no such question is its own sentence, in both renderings", async () => {
+  const env = await vapidEnv();
+  const res = await get("desk.bounded.tools", "/human/doesnotexist.json", env);
+  assert.equal(res.status, 404);
+  assert.match((await res.json()).error, /no such question/);
+  const h = await get("desk.bounded.tools", "/human/doesnotexist", env);
+  assert.equal(h.status, 404);
+  const body = await h.text();
+  assert.match(body, /could not be read/);
+  assert.ok(!/data-status/.test(body), "no state is reported for a question that is not there");
+});
+
+test("caller-supplied question text cannot break out of the card", async () => {
+  const env = await vapidEnv();
+  await seedQuestion(env, { id: "x1", prompt: "<script>x</script>", choices: ["<b>y</b>"] });
+  const h = await (await get("desk.bounded.tools", "/human/x1", env)).text();
+  assert.doesNotMatch(h, /<script>x<\/script>/);
+  assert.match(h, /&lt;script&gt;/);
+  assert.match(h, /&lt;b&gt;y&lt;\/b&gt;/);
+});
+
+test("A PUSH WAKE COSTS THE SAME whether five questions are on file or five hundred", async () => {
+  // /pending is unauthenticated and is what the service worker fetches on every
+  // wake. Reading every stored question to find the open ones made an anonymous
+  // GET cost one KV read per question ever asked — records live 28 days, so the
+  // fan grew with ask volume, and past the Workers subrequest ceiling /pending
+  // fails and the phone falls back to "The board changed." (#51's own defect).
+  const env = await vapidEnv();
+  for (let i = 0; i < 200; i++) await seedQuestion(env, { id: `closed${String(i).padStart(3, "0")}`, prompt: `p${i}` });
+  await seedQuestion(env, { id: "live1", prompt: "the one still open", deadline: ahead(3) });
+
+  env.SUBSCRIPTIONS.counts.get = 0;
+  const d = await (await get("desk.bounded.tools", "/pending", env)).json();
+  assert.equal(d.body, "the one still open");
+  assert.ok(env.SUBSCRIPTIONS.counts.get <= 5,
+    `one wake should cost a handful of reads, not the corpus — it cost ${env.SUBSCRIPTIONS.counts.get}`);
+
+  // And the 200 closed records are still on file, still describable: bounding
+  // the wake must not have been done by throwing the corpus away.
+  assert.equal((await (await get("desk.bounded.tools", "/human/closed000.json", env)).json()).status, "blocked");
+});
+
+test("a question is announced as a question, never as an approval", async () => {
+  const env = await vapidEnv();
+  await seedQuestion(env, { id: "open1", prompt: "who owns this?", deadline: ahead(5) });
+  const d = await (await get("desk.bounded.tools", "/pending", env)).json();
+  assert.equal(d.kind, "question");
+  assert.equal(d.body, "who owns this?");
+  assert.equal(d.url, questionUrlFor("open1"));
 });

@@ -35,6 +35,16 @@
 // display stays exactly as #51 designed it. `pendingApprovals()` is the whole
 // set, for a UI that can show it; `pending()` is the newest, for the phone.
 
+// Questions live in their own module and their own key space (#69). pending()
+// folds them in because the phone gets ONE thing; nothing else here knows about
+// them, and questions.js knows nothing about approvals.
+//
+// It asks for ONE question rather than for the open set, because this endpoint
+// is unauthenticated: what it costs to answer is what an anonymous caller can
+// make us spend, and reading the whole corpus to name one question grew that
+// cost with every question ever asked.
+import { oldestOpenQuestion } from "./questions.js";
+
 /** Matches the keeper's ceremony window: an approval nobody can act on is not pending. */
 export const APPROVAL_TTL_SECONDS = 900;
 
@@ -156,14 +166,32 @@ export async function pendingApprovals(kv) {
 /**
  * What the worker should show: ONE thing.
  *
- * The newest outstanding approval if there is one, and otherwise the
- * board-changed default it always had — so the old path keeps working rather
- * than becoming a special case. #51's reasoning stands: the reader has to open
- * the newest anyway, so a phone that announces a backlog is worse than one that
- * announces the thing to do now. `pendingApprovals()` is where the rest lives.
+ * The newest outstanding approval if there is one, then the oldest open
+ * question (#69), and otherwise the board-changed default it always had — so
+ * the old path keeps working rather than becoming a special case. #51's
+ * reasoning stands: the reader has to open the newest anyway, so a phone that
+ * announces a backlog is worse than one that announces the thing to do now.
+ * `pendingApprovals()` and `questionViews()` are where the rest lives.
+ *
+ * AN APPROVAL OUTRANKS A QUESTION, and the reason is the WINDOW, not the
+ * importance. An approval is actionable for fifteen minutes and then is not; a
+ * question can be answered tomorrow. Showing the question first would spend the
+ * one slot on the thing that will still be there later.
+ *
+ * The kinds stay distinct all the way to the device. A question rendered as an
+ * approval is a lock screen asking for a Face ID that nothing is waiting on —
+ * the rung confusion this whole split exists to prevent, made visible.
  */
-export async function pending(kv) {
+export async function pending(kv, now = Date.now()) {
   const [newest] = await pendingApprovals(kv);
   if (newest) return newest;
+
+  // Oldest first among questions: they do not expire out from under a reader,
+  // so the one that has been waiting longest is the one to raise. The clock is
+  // an argument because whether a question is still open is a judgement about a
+  // moment, and a caller that cannot name the moment cannot test the judgement.
+  const q = await oldestOpenQuestion(kv, now);
+  if (q) return { kind: "question", title: "A question for you", body: q.prompt, url: q.url };
+
   return { kind: "board", title: "Front Desk", body: "The board changed.", url: "/" };
 }
