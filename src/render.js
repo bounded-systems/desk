@@ -313,6 +313,21 @@ const STYLE = `
       font-size:var(--text-small);
       font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 
+    /* A question's text is CALLER-SUPPLIED and routinely carries an unbreakable
+       token — a SHA, a run URL, an id. Left to wrap normally that sets the
+       page's min-content width to the length of the token, and Chromium widens
+       the layout viewport and scales the whole page down to fit it: the exact
+       defect the layout suite was built for (#61). Same rule the board title
+       already carries, for the same reason. */
+    /* The rule is on the CARD, not on the prompt: the prompt, the choices, the
+       answer and the declared default are ALL caller-supplied, and measured at
+       320px a single unwrapped choice in .mono widened the layout viewport to
+       381 on its own. Scoping it to one child is how that gets missed again. */
+    .q { margin:0 0 var(--space-7); overflow-wrap:anywhere; }
+    .q__prompt { margin:0 0 var(--space-3); }
+    .q__value { margin:0 0 var(--space-3); }
+    .q__value-t { font-weight:650; }
+
     /* Tier C — routine. DEMOTED, never hidden, never truncated: a dependabot row
        is still a row, its count is still in the section head, and its SHAs are
        what tell four otherwise identical rows apart. The underline comes off
@@ -800,6 +815,182 @@ export function renderOverview(d, now = Date.now(), edgeTtlSeconds = 60) {
       <footer><p class="muted">Each host answers exactly one question, reads the feed live on every
         request, and fails closed rather than showing an empty list it cannot vouch for.</p></footer>`,
     APP_HEAD,
+  );
+}
+
+// ── /human: a question waiting on a person (#69) ─────────────────────────────
+//
+// FIVE STATES, FIVE SENTENCES. The house rule from `overviewSection` — where
+// "unreadable", "empty" and "truncated" each get their own words rather than
+// collapsing into a count — applies here with more at stake: "a person answered
+// yes" and "nobody answered and the asker had declared yes in advance" are not
+// the same fact, and a card that renders them the same way is output that reads
+// as more than it established.
+//
+// THE STATE IS ALSO MACHINE-READABLE, via data-status. Not decoration: it is
+// the same string /human.json reports, so a test can assert the two renderings
+// agree rather than regexing prose that would match the explanation as happily
+// as the state.
+const QUESTION_STATE = {
+  open: {
+    stale: false,
+    head: "Waiting for a person.",
+    text: "Nobody has answered this yet.",
+  },
+  answered: {
+    stale: false,
+    head: "A person answered.",
+    text: "This is what they said. It is reviewed information, not a decision anything may be spent as.",
+  },
+  "default-fired": {
+    stale: true,
+    head: "Nobody answered. The declared default fired.",
+    text:
+      "No person looked at this. The value below is the one the asker declared in advance for exactly " +
+      "this case, and it is recorded as a default rather than as an answer.",
+  },
+  blocked: {
+    stale: true,
+    head: "Nobody answered, and the asker declared block.",
+    text: "No value was substituted. Whatever was waiting on this is still waiting.",
+  },
+  escalated: {
+    stale: true,
+    head: "Nobody answered, and the asker declared escalate.",
+    text: "No value was substituted. The asker declared that this goes to a person another way instead.",
+  },
+};
+
+const NO_ANSWER_COPY = {
+  default: (v) => `if nobody answers, the asker declared the value <strong>${esc(v)}</strong>`,
+  block: () => "if nobody answers, the asker declared that nothing proceeds",
+  escalate: () => "if nobody answers, the asker declared that it escalates",
+};
+
+/**
+ * The one sentence this page must never stop saying.
+ *
+ * An answer here is information a person reviewed. desk#65 caps it there and
+ * cannot cap it higher: a record whose relying party is the requester is
+ * self-asserted about everything except that a person was present. Approving
+ * stays at the keeper, on a different credential.
+ */
+const RUNG_LINE = `<p class="muted">An answer here is <strong>human-reviewed</strong> information —
+        what a person said. It is not an approval and authorizes nothing; approvals are a different
+        credential at the keeper.</p>`;
+
+/**
+ * Why there is no button.
+ *
+ * The answer door is shut until desk login lands (desk#65), and this page keeps
+ * the posture the notification opt-in states outright: a dead control is worse
+ * than none, because a page that offers something it cannot honour has told the
+ * reader something untrue about itself.
+ */
+const ANSWERING_LINE = `<p class="muted">Answering is not open here yet — it needs desk login, which is
+        not built (desk#65). Until it is, this page reports the question and its state and offers no
+        control it cannot honour.</p>`;
+
+function questionCard(q, { heading = "h2" } = {}) {
+  const st = QUESTION_STATE[q.status] || QUESTION_STATE.open;
+  const value = q.answer ? q.answer.value : q.default_value;
+  return `<section class="q" id="q-${esc(q.id)}">
+        <${heading} class="q__prompt">${esc(q.prompt)}</${heading}>
+        <div class="stamp${st.stale ? " stamp--stale" : ""} q__state" data-status="${esc(q.status)}">
+          <strong>${esc(st.head)}</strong> ${esc(st.text)}
+        </div>
+        ${
+          value == null
+            ? ""
+            : `<p class="q__value">${vh(q.answer ? "Answer: " : "Default: ")}<span class="q__value-t">${esc(value)}</span>
+          <span class="muted"> — ${q.answer ? "given by a person" : "declared in advance, not given by anyone"}</span></p>`
+        }
+        ${
+          q.choices
+            ? `<p class="muted">Choices offered: ${q.choices.map((c) => `<span class="mono">${esc(c)}</span>`).join(", ")}</p>`
+            : ""
+        }
+        <p class="muted">Asked <span class="mono">${esc(q.asked_at ?? "at an unrecorded time")}</span> ·
+          answers close <span class="mono">${esc(q.deadline ?? "at an unrecorded time")}</span> ·
+          ${NO_ANSWER_COPY[q.no_answer_policy] ? NO_ANSWER_COPY[q.no_answer_policy](q.no_answer_value) : "no policy on file"}.</p>
+      </section>`;
+}
+
+/**
+ * ONE renderer for /human, because there is one judgement behind it.
+ *
+ * It takes exactly what /human.json serves — a question view, the list, the
+ * refusal or the error — so the two renderings cannot be computed from
+ * different things. The worker selects once and forks only at the return.
+ */
+export function renderHuman(payload) {
+  if (payload && payload.kind === "question") {
+    return page(
+      "Desk — a question for a person",
+      "A question a lane put in front of a person, and what has happened to it since.",
+      `    <h1>A question</h1>
+      ${questionCard(payload)}
+      ${RUNG_LINE}
+      ${ANSWERING_LINE}
+      <footer><p class="muted">Asked by a lane that then exited. Nobody is blocked on this page being
+        open.</p></footer>`,
+    );
+  }
+
+  // The listing. NOT REACHABLE TODAY: desk is public and has no login, so the
+  // collection route refuses below (`mayList`, desk#65). Kept whole and rendered
+  // from the same card as a single question, so landing that login is a change
+  // to one predicate rather than a page written from memory a year later.
+  if (payload && payload.kind === "questions") {
+    const qs = payload.questions || [];
+    return page(
+      "Desk — questions for a person",
+      "Every question a lane has put in front of a person, and what has happened to each.",
+      `    <h1>Questions</h1>
+    <p class="lede">What lanes have asked a person, newest first — and for each, whether a person
+      answered, or nobody did and the asker's declared policy took over.</p>
+      ${
+        qs.length
+          ? qs.map((q) => questionCard(q, { heading: "h2" })).join("\n")
+          : `<div class="stamp"><strong>No questions have been asked.</strong> This is empty, not
+        unreadable — nothing has called /human.</div>`
+      }
+      ${RUNG_LINE}
+      ${ANSWERING_LINE}`,
+    );
+  }
+
+  // The corpus is not public (desk#65) — its own page and its own sentence.
+  // NOT the "could not be read" page below: a reader told a record is
+  // unreadable when it is simply not theirs to read goes looking for a fault
+  // that is not there, and NOT an empty list, which would say there are none.
+  if (payload && payload.kind === "closed") {
+    return page(
+      "Desk — questions are not listed here",
+      "Questions are readable one at a time, at their own addresses.",
+      `    <h1>The questions are not listed here</h1>
+      <div class="stamp stamp--stale">
+        <strong>This is not an empty list.</strong> Desk is public and has no login yet, so every
+        question ever asked is not something this page will hand out. A question is readable at its
+        own address — the one the person who was asked was given.
+      </div>
+      <p class="muted mono">${esc((payload && payload.error) || "unknown")}</p>
+      ${RUNG_LINE}`,
+    );
+  }
+
+  // Not a question and not a list: the read failed, and it says so rather than
+  // rendering an empty page that reads as "there are none".
+  return page(
+    "Desk — question unavailable",
+    "This question could not be read.",
+    `    <h1>This question could not be read</h1>
+      <div class="stamp stamp--stale">
+        <strong>This is not an answered question, and not an unanswered one.</strong> The record
+        behind this address could not be read, so nothing is shown about it rather than a state that
+        would be made up.
+      </div>
+      <p class="muted mono">${esc((payload && payload.error) || "unknown")}</p>`,
   );
 }
 
