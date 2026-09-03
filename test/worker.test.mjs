@@ -503,6 +503,11 @@ async function vapidEnv(extra = {}) {
     VAPID_PUBLIC_KEY: pub,
     VAPID_PRIVATE_KEY: jwk.d,
     VAPID_SUBJECT: "mailto:desk@bounded.tools",
+    // Not a real secret and not a real key: the session MAC is HMAC over this
+    // string, so any string works and a test that needed a specific one would be
+    // testing the string. The gated routes need it present, because a deploy
+    // without it refuses everything (test/login.test.mjs pins that).
+    SESSION_SECRET: "test-session-secret",
     SUBSCRIPTIONS: kvStub(),
     ...extra,
   };
@@ -1078,11 +1083,13 @@ test("THE ANSWER ROUTE REFUSES, names desk#65, and stores nothing", async () => 
                      : { "content-type": "application/json" },
       body: JSON.stringify({ value: "yes" }),
     }), env);
-    // 501, not 401: there is no credential to present. And an OIDC token — the
-    // door the ASK uses — must not open it, or a lane answers its own question
-    // and the record reads as human-reviewed with no human involved.
-    assert.equal(res.status, 501);
+    // 401 now, not the old 501: desk login exists (desk#65), so there IS a
+    // credential to present and the status may invite it. And an OIDC token —
+    // the door the ASK uses — still must not open it, or a lane answers its own
+    // question and the record reads as human-reviewed with no human involved.
+    assert.equal(res.status, 401);
     assert.match((await res.json()).error, /desk#65/);
+    assert.ok(!res.headers.getSetCookie().length, "a refusal mints no session");
   }
   const after = await (await get("desk.bounded.tools", `/human/${body.id}.json`, env)).json();
   assert.equal(after.answer, null);
@@ -1096,7 +1103,10 @@ test("the card offers no control it cannot honour", async () => {
   const body = page.slice(page.indexOf("<body>"));
   assert.ok(!/<form/.test(body), "form-action is 'none' on every surface — a form here would be inert");
   assert.ok(!/<button/.test(body), "a dead button is worse than none");
-  assert.match(body, /Answering is not open here yet/);
+  // Desk login exists now, and this page still offers no control: form-action is
+  // 'none' on every surface, so the sentence says where answering happens rather
+  // than pretending a button could.
+  assert.match(body, /POST \/human\/&lt;id&gt;\/answer/);
   assert.match(body, /desk#65/);
 });
 
@@ -1208,7 +1218,7 @@ test("the card is not cached stale", async () => {
 // address a lane had ever asked, for as long as the record lived. The answer
 // door was shut on exactly the reasoning that desk login gates VIEWING; the
 // view half was not, and enumeration is the half that scales.
-test("THE WHOLE CORPUS IS NOT HANDED OUT to an unauthenticated caller", async () => {
+test("THE WHOLE CORPUS IS NOT HANDED OUT to a caller desk cannot name", async () => {
   const env = await vapidEnv();
   await seedQuestion(env, {
     id: "leak1", prompt: "Rotate the leaked deploy key now, or wait for Tuesday?",
@@ -1218,9 +1228,12 @@ test("THE WHOLE CORPUS IS NOT HANDED OUT to an unauthenticated caller", async ()
 
   for (const path of ["/human.json", "/human"]) {
     const res = await get("desk.bounded.tools", path, env);
-    // 501, the same status and the same seam shape as the answer door: there is
-    // no credential to present, so 401 would invite one that does not exist.
-    assert.equal(res.status, 501, path);
+    // 401, the same status and the same seam shape as the answer door: desk
+    // login exists (desk#65), so the status invites the credential that opens it.
+    assert.equal(res.status, 401, path);
+    // A cookie decides this body, so it never goes to a shared cache.
+    assert.equal(res.headers.get("cache-control"), "no-store", path);
+    assert.equal(res.headers.get("vary"), "cookie", path);
     const body = await res.text();
     assert.ok(!body.includes("Rotate the leaked deploy key"), `${path} leaked the prompt`);
     assert.ok(!body.includes("tuesday"), `${path} leaked the declared default`);

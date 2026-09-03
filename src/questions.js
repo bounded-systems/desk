@@ -25,6 +25,7 @@
 // (`sub:`) and approvals (`pending:approval:`) already are.
 
 import { b64url } from "./push.js";
+import { currentCredential } from "./login.js";
 
 /** The rung an answer reaches, and the highest it ever can (desk#65). */
 export const ANSWER_RUNG = "human-reviewed";
@@ -388,7 +389,7 @@ export async function oldestOpenQuestion(kv, now = Date.now()) {
 }
 
 /**
- * THE ANSWER DOOR IS SHUT, AND THIS IS WHERE IT IS SHUT (desk#65).
+ * THE ANSWER DOOR, AND THE ONE CREDENTIAL THAT OPENS IT (desk#65).
  *
  * desk#65 settled the credential split, and it is two credentials for two
  * purposes that must never be conflated:
@@ -397,10 +398,11 @@ export async function oldestOpenQuestion(kv, now = Date.now()) {
  *                                                  answering — same rung)
  *   keyholder passkey, rp.id = keeper.bounded.tools gates APPROVING, unchanged
  *
- * Desk login does not exist yet; building it is desk#65's own claim, since
- * widened to cover private pages generally. Until it lands this returns false
- * for every caller, which is the only honest option: a route anyone with the
- * link can post to, described as authenticated, is worse than no route.
+ * Desk login now exists (src/login.js) and this is the seam it was written for:
+ * the predicate changed and nothing else did. What it asks is not "was a cookie
+ * presented" but "is the credential that cookie names STILL LIVE" — the read
+ * happens on every call, so a revoked credential loses its session at the next
+ * request rather than at the cookie's expiry.
  *
  * It is deliberately NOT the OIDC door /human's ask side uses. That door
  * authenticates a WORKFLOW AT A REF — there is no claim shape in it for a
@@ -410,44 +412,53 @@ export async function oldestOpenQuestion(kv, now = Date.now()) {
  * And desk must never verify APPROVAL assertions to open this: a record whose
  * relying party is the requester caps at `human-reviewed`, which is a committed
  * vector in claim-digest.vectors.json. Viewing and answering are fine at that
- * rung. Approving is not, and stays at the keeper.
+ * rung — an answer given through this door is still ANSWER_RUNG and nothing
+ * here ever writes `human-authorized`. Approving stays at the keeper.
  */
-export function mayAnswer(_request, _env) {
+export async function mayAnswer(request, env) {
+  const who = await currentCredential(request, env);
+  if (who.ok) return { ok: true, credential: who.credential };
   return {
     ok: false,
+    // A DISCRIMINATOR, not a sentence to match on. 401 with no session, 403 with
+    // one whose credential is no longer live, 503 on a deployment that cannot
+    // check either — the call site maps it, and nothing string-matches a reason.
+    status: who.status,
+    clear: who.clear,
     reason:
-      "answering needs desk login (rp.id desk.bounded.tools), which is not built yet — desk#65. " +
+      `${who.reason}. Answering needs desk login (rp.id desk.bounded.tools) — desk#65. ` +
       "No other credential is accepted here: an approval assertion caps at human-reviewed and belongs to the keeper.",
   };
 }
 
 /**
- * MAY THIS CALLER READ THE WHOLE CORPUS? No — and this is where that is said.
+ * MAY THIS CALLER READ THE WHOLE CORPUS? Only a signed-in one (desk#65).
  *
- * desk is PUBLIC. `surfaceFor()` gives it no hostname of its own, select.js
- * keeps the private projection off it entirely, and there is no login yet
- * (desk#65). A collection route on that surface published every question ever
- * asked — prompt, choice set, declared default, deadline, id and address, for
- * QUESTION_TTL_SECONDS — to anyone who asked for it. `mayAnswer` below shut the
- * answer half on exactly this reasoning ("desk login gates VIEWING"); the view
- * half shipped open, and enumeration is the half of it that scales.
+ * `surfaceFor()` gives desk no hostname of its own and select.js keeps the
+ * private projection off it entirely, so before login a collection route
+ * published every question ever asked — prompt, choice set, declared default,
+ * deadline, id and address, for QUESTION_TTL_SECONDS — to anyone who asked.
+ * Enumeration is the half of that exposure which scales.
  *
- * So the LISTING is shut and one question stays readable at its own address.
- * BE PLAIN ABOUT WHAT THAT IS AND IS NOT: an unguessable address is not a
- * credential. It is the capability the notification hands to the person, and it
- * bounds an exposure to whoever holds one link instead of to everyone who can
- * spell /human.json. /pending still names the one question it is raising, by
- * the same design that already names an approval's title and keeper URL (#51).
- * The rest of the corpus is no longer reachable without the addresses.
+ * WHAT THE GATE DOES AND DOES NOT CHANGE. One question stays readable at its own
+ * address, signed in or not, and an unguessable address is still not a
+ * credential: it is the capability the notification hands to the person, and it
+ * bounds an exposure to whoever holds one link. /pending still names the one
+ * question it is raising, by the same design that already names an approval's
+ * title and keeper URL (#51). Only the CORPUS moved behind the login.
  *
- * Flipping this is desk#65 landing, and it is one predicate — the same seam
- * `mayAnswer` is, for the same reason.
+ * Same predicate shape as `mayAnswer`, same admission re-read, and it gates the
+ * listing only — not a wider set than it did when it refused everyone.
  */
-export function mayList(_request, _env) {
+export async function mayList(request, env) {
+  const who = await currentCredential(request, env);
+  if (who.ok) return { ok: true, credential: who.credential };
   return {
     ok: false,
+    status: who.status,
+    clear: who.clear,
     reason:
-      "the list of questions needs desk login (rp.id desk.bounded.tools), which is not built yet — desk#65. " +
+      `${who.reason}. The list of questions needs desk login (rp.id desk.bounded.tools) — desk#65. ` +
       "A question is readable at its own address; the corpus is not public.",
   };
 }

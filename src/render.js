@@ -880,16 +880,18 @@ const RUNG_LINE = `<p class="muted">An answer here is <strong>human-reviewed</st
         credential at the keeper.</p>`;
 
 /**
- * Why there is no button.
+ * Why there is still no button.
  *
- * The answer door is shut until desk login lands (desk#65), and this page keeps
- * the posture the notification opt-in states outright: a dead control is worse
- * than none, because a page that offers something it cannot honour has told the
- * reader something untrue about itself.
+ * Desk login exists now (desk#65) and the answer route is behind it, but nothing
+ * on THIS page can drive it: `form-action` is 'none' on every surface, so a form
+ * here would be inert, and no browser-side sign-in ships yet. The posture the
+ * notification opt-in states outright holds — a dead control is worse than none,
+ * because a page that offers something it cannot honour has told the reader
+ * something untrue about itself.
  */
-const ANSWERING_LINE = `<p class="muted">Answering is not open here yet — it needs desk login, which is
-        not built (desk#65). Until it is, this page reports the question and its state and offers no
-        control it cannot honour.</p>`;
+const ANSWERING_LINE = `<p class="muted">Answering needs a signed-in desk session (desk#65) and happens
+        at <span class="mono">POST /human/&lt;id&gt;/answer</span>. This page reports the question and
+        its state and offers no control it cannot honour.</p>`;
 
 function questionCard(q, { heading = "h2" } = {}) {
   const st = QUESTION_STATE[q.status] || QUESTION_STATE.open;
@@ -937,10 +939,9 @@ export function renderHuman(payload) {
     );
   }
 
-  // The listing. NOT REACHABLE TODAY: desk is public and has no login, so the
-  // collection route refuses below (`mayList`, desk#65). Kept whole and rendered
-  // from the same card as a single question, so landing that login is a change
-  // to one predicate rather than a page written from memory a year later.
+  // The listing. Reachable to a signed-in reader since desk#65 (`mayList`), and
+  // rendered from the same card as a single question so a person and an agent
+  // cannot be shown two different judgements about one question.
   if (payload && payload.kind === "questions") {
     const qs = payload.questions || [];
     return page(
@@ -970,9 +971,10 @@ export function renderHuman(payload) {
       "Questions are readable one at a time, at their own addresses.",
       `    <h1>The questions are not listed here</h1>
       <div class="stamp stamp--stale">
-        <strong>This is not an empty list.</strong> Desk is public and has no login yet, so every
-        question ever asked is not something this page will hand out. A question is readable at its
-        own address — the one the person who was asked was given.
+        <strong>This is not an empty list.</strong> The corpus is behind desk login (desk#65), so
+        every question ever asked is not something this page will hand out to a caller it cannot
+        name. A question is readable at its own address — the one the person who was asked was
+        given.
       </div>
       <p class="muted mono">${esc((payload && payload.error) || "unknown")}</p>
       ${RUNG_LINE}`,
@@ -989,6 +991,63 @@ export function renderHuman(payload) {
         <strong>This is not an answered question, and not an unanswered one.</strong> The record
         behind this address could not be read, so nothing is shown about it rather than a state that
         would be made up.
+      </div>
+      <p class="muted mono">${esc((payload && payload.error) || "unknown")}</p>`,
+  );
+}
+
+/**
+ * THE PENDING-APPROVALS QUEUE (desk#65) — every outstanding one, behind the login.
+ *
+ * ONE LINK PER ENTRY AND NOTHING ELSE. There is no "approve all" and there are
+ * no controls: rows 5-6 of the infra#555 chain are display → intent, and a
+ * button that means yes to a set the reader did not open attacks precisely
+ * those. Approving happens at the keeper, under the other credential, one
+ * ceremony at a time — so what this page can offer is the address, and the
+ * address is what it offers.
+ *
+ * The entries carry title, body and url, which is all `pendingApprovals()`
+ * projects. No ceremony material reaches this function to be leaked.
+ */
+export function renderQueue(payload) {
+  if (payload && payload.kind === "queue") {
+    const rows = payload.approvals || [];
+    return page(
+      "Desk — what is waiting for a person",
+      "Every approval whose ceremony window is still open.",
+      `    <h1>Waiting for a person</h1>
+    <p class="lede">Every approval whose window is still open, newest first. Each is approved at the
+      keeper, with the keyholder passkey — this page shows what is outstanding and where to go.</p>
+      ${
+        rows.length
+          ? rows.map((a) => `<section class="q">
+        <h2 class="q__prompt">${esc(a.title ?? "An approval")}</h2>
+        <p>${esc(a.body ?? "")}</p>
+        <p class="muted">Raised <span class="mono">${esc(a.at ?? "at an unrecorded time")}</span> ·
+          <a href="${esc(a.url)}">${esc(a.url)}</a></p>
+      </section>`).join("\n")
+          : `<div class="stamp"><strong>Nothing is waiting.</strong> This is empty, not unreadable —
+        no approval ceremony is open. Windows are short, so an approval you were told about may
+        already have closed.</div>`
+      }
+      <p class="muted">These are approvals, not questions: each is a <strong>human-authorized</strong>
+        ceremony completed at the keeper under a different credential. Reading this page authorizes
+        nothing, and there is no way to approve several at once — every ceremony is opened, read and
+        answered on its own.</p>`,
+    );
+  }
+
+  // Not signed in. Its own sentence, and NOT "nothing is waiting": a reader told
+  // the queue is empty stops looking, which is the one thing a queue must never
+  // say to someone who simply has not signed in.
+  return page(
+    "Desk — the queue is not open to this caller",
+    "What is waiting for a person is readable to a person, once they have signed in.",
+    `    <h1>The queue is not readable here</h1>
+      <div class="stamp stamp--stale">
+        <strong>This is not an empty queue.</strong> What is outstanding is readable to a signed-in
+        person (desk#65). Nothing about any pending ceremony — not its title, not its address — is
+        on this page.
       </div>
       <p class="muted mono">${esc((payload && payload.error) || "unknown")}</p>`,
   );

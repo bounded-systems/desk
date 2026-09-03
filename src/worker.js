@@ -46,6 +46,7 @@ import {
   renderUnavailable,
   renderOffline,
   renderHuman,
+  renderQueue,
 } from "./render.js";
 import { validateSubscription, putSubscription } from "./subscriptions.js";
 import { notifyAll } from "./notify.js";
@@ -53,7 +54,19 @@ import { importVapidKey } from "./push.js";
 import { verifyNotifyCaller } from "./oidc.js";
 import { AVATAR_SVG, ICON_PNGS, iconBytes } from "./icons.js";
 import { FOREST } from "./tokens.js";
-import { validateApproval, putApproval, pending } from "./pending.js";
+import { validateApproval, putApproval, pending, pendingApprovals, ceremonyIdFrom } from "./pending.js";
+import {
+  activate,
+  clearedCookie,
+  currentCredential,
+  endSessions,
+  loginFinish,
+  loginStart,
+  mayViewQueue,
+  registerFinish,
+  registerStart,
+  revokeCredential,
+} from "./login.js";
 import {
   validateQuestion,
   putQuestion,
@@ -528,6 +541,37 @@ const json = (body, status, ttl) =>
     },
   });
 
+/**
+ * A response for something a COOKIE gated.
+ *
+ * `json()`/`html()` above emit `public, max-age=<ttl>` on every 200 and set no
+ * `Vary`, which is correct for a board every reader sees the same version of and
+ * wrong for anything a session decides the contents of: a shared cache would
+ * hand one reader's queue to the next. So gated content gets its own builder —
+ * `no-store`, `Vary: cookie` — rather than a mutation of the shared one, which
+ * would also have moved the public board's caching (a committed test pins
+ * `public, max-age=0` on the question card, which is NOT gated: a question stays
+ * readable at its own address).
+ */
+const priv = (body, status, type, extra = {}) =>
+  new Response(body, {
+    status,
+    headers: {
+      "content-type": type,
+      "cache-control": "no-store",
+      "vary": "cookie",
+      "referrer-policy": "strict-origin-when-cross-origin",
+      "x-content-type-options": "nosniff",
+      ...extra,
+    },
+  });
+
+const privJson = (body, status, extra = {}) =>
+  priv(JSON.stringify(body, null, 2) + "\n", status, "application/json; charset=utf-8", extra);
+
+const privHtml = (body, status, extra = {}) =>
+  priv(body, status, "text/html; charset=utf-8", { "content-security-policy": CSP_APP, ...extra });
+
 /** Which page this request is for. Unknown hosts get the front door. */
 function surfaceFor(hostname, env) {
   for (const [name, h] of Object.entries(HOSTS)) {
@@ -738,6 +782,9 @@ export async function handleApproval(request, env) {
  * prompt plus a choice set is a different budget from a push subscription. */
 const MAX_QUESTION_BODY = 4096;
 
+/** Longest login body worth reading — an attestationObject is ~1KB of base64url. */
+const MAX_LOGIN_BODY = 8192;
+
 /**
  * `/human`, `/human.json`, `/human/<id>`, `/human/<id>.json` — and nothing else.
  *
@@ -755,6 +802,13 @@ function matchHuman(pathname) {
 
 /** The answer route. Separate pattern, so `/human/<id>` cannot reach it. */
 const RE_HUMAN_ANSWER = /^\/human\/([A-Za-z0-9_-]{1,64})\/answer$/;
+
+/**
+ * The login routes (desk#65). An EXPLICIT list, not `/login/*`: a pattern that
+ * matched anything under /login would send an unknown path to the dispatcher and
+ * make "which door is this" a question answered twice.
+ */
+const RE_LOGIN = /^\/login\/(register\/start|register\/finish|activate|start|finish|revoke|logout)$/;
 
 /**
  * Ask a person something, and exit (#69).
@@ -824,29 +878,158 @@ export async function handleQuestion(request, env) {
 }
 
 /**
- * Record a person's answer — REFUSED UNTIL DESK LOGIN LANDS (desk#65).
+ * THE LOGIN DOOR (desk#65) — seven POSTs, one dispatcher.
+ *
+ * A DIFFERENT DOOR from /notify, /approval and /human's ask side. Those verify a
+ * GitHub Actions OIDC token, which authenticates a WORKFLOW AT A REF and has no
+ * claim shape in it for a person; this authenticates a person's passkey. Neither
+ * opens the other, and there is no path here that consults `verifyNotifyCaller`.
+ *
+ * WHAT EACH ONE IS:
+ *   register/start, register/finish  anyone may register; what they get is a
+ *                                    PENDING credential that can do nothing.
+ *   activate                         redeems a keeper grant; pending → live.
+ *                                    The one door that grants any authority, and
+ *                                    the keeper is what decides it.
+ *   start, finish                    the login ceremony itself.
+ *   revoke                           live → revoked. Behind a live session, so
+ *                                    it needs no keeper and stays reachable in
+ *                                    the incident where it is wanted.
+ *   logout                           clears the cookie. Nothing to consult.
+ *
+ * Bodies are read only after the route is resolved and, for revoke, only after
+ * the session is — the same ordering `handleAnswer` states: a door that is shut
+ * should not be able to store anything a caller sent it.
+ */
+export async function handleLogin(request, env, which) {
+  const no = (status, error, extra = {}) =>
+    new Response(JSON.stringify({ error }) + "\n", {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra },
+    });
+  const yes = (status, value, extra = {}) =>
+    new Response(JSON.stringify(value, null, 2) + "\n", {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra },
+    });
+
+  // LOGOUT FIRST, ABOVE THE STORE GUARD -- the comment below used to sit under
+  // that guard and was therefore false (desk#65 review). Clearing a cookie needs
+  // nothing, and a deployment with no credential store must still let a person
+  // drop their own session.
+  if (which === "logout") {
+    // Best effort: invalidates every cookie for this credential by bumping its
+    // epoch. If the store is absent or the write fails, the cookie is still
+    // cleared -- see endSessions for why that failure direction is the right one.
+    if (env.SUBSCRIPTIONS) {
+      const who = await currentCredential(request, env);
+      if (who.ok) await endSessions(env.SUBSCRIPTIONS, who.credential.credentialId);
+    }
+    return yes(200, { ok: true }, { "set-cookie": clearedCookie() });
+  }
+
+  if (!env.SUBSCRIPTIONS) return no(503, "no credential store is configured on this deployment");
+
+  // THE SESSION FIRST for revoke, before the body is read at all: a door that is
+  // shut should not be able to store anything a caller sent it, which is the
+  // ordering `handleAnswer` states and the reason this check is not further down
+  // beside the call. A revoked credential cannot revoke, because this re-reads.
+  if (which === "revoke") {
+    const may = await mayViewQueue(request, env);
+    if (!may.ok) return no(may.status, may.reason, may.clear ? { "set-cookie": clearedCookie() } : {});
+  }
+
+  let body = {};
+  if (which !== "start") {
+    const text = await request.text();
+    if (text.length > MAX_LOGIN_BODY) return no(413, "login body too large");
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return no(400, "body is not JSON");
+      }
+    }
+  }
+
+  let out;
+  if (which === "register/start") out = await registerStart(env.SUBSCRIPTIONS, body);
+  else if (which === "register/finish") out = await registerFinish(env.SUBSCRIPTIONS, body);
+  else if (which === "activate") out = await activate(env.SUBSCRIPTIONS, body);
+  else if (which === "start") out = await loginStart(env.SUBSCRIPTIONS, body);
+  else if (which === "finish") out = await loginFinish(env.SUBSCRIPTIONS, body, env);
+  else if (which === "revoke") out = await revokeCredential(env.SUBSCRIPTIONS, body.credentialId);
+  else return no(404, "not found");
+
+  if (!out.ok) return no(out.status, out.reason);
+  return yes(out.status, out.value, out.cookie ? { "set-cookie": out.cookie } : {});
+}
+
+/**
+ * THE PENDING-APPROVALS QUEUE (desk#65's actual ask), behind the login.
+ *
+ * WHAT IT IS FOR: /pending names ONE thing, because a phone gets one thing. That
+ * is right for a notification and useless for a person who wants to know what is
+ * outstanding. This is the whole set, and `pendingApprovals()` already returns
+ * it — keyed, per-entry TTL, paged, newest first. Nothing new is stored.
+ *
+ * WHAT IT DELIBERATELY DOES NOT HAVE:
+ *   NO "approve all". Rows 5-6 of the infra#555 chain — display → intent — are
+ *   the weakest links in the ceremony, and one button that means yes to a set a
+ *   person did not read is an attack on exactly those two.
+ *   NO challenge material. Entries carry title, body and url, which is what
+ *   pendingApprovals projects; reaching past it to the raw record would be the
+ *   only way to leak more, and nothing here does.
+ *   NO TTL extension, and no writes at all. The ceremony clocks belong to the
+ *   keeper.
+ *
+ * Approving is still done AT THE KEEPER, under the other credential: each entry
+ * is a link to keeper.bounded.tools/a/<id> and nothing else. The url is re-read
+ * through `ceremonyIdFrom` on the way out — validateApproval already pins the
+ * host on the way in and is untouched, but a link rendered to a person is worth
+ * checking twice, and a record that does not name a keeper ceremony is dropped
+ * rather than linked.
+ */
+async function selectQueue(request, env) {
+  const may = await mayViewQueue(request, env);
+  if (!may.ok) return { status: may.status, clear: may.clear, value: { kind: "closed", error: may.reason } };
+  const approvals = (await pendingApprovals(env.SUBSCRIPTIONS)).filter((a) => ceremonyIdFrom(a.url));
+  // APPROVALS ONLY. Questions are behind the same gate at /human, under
+  // `mayList`, and folding them in here would make this route a second read path
+  // for them — the thing #69's "one judgement, two renderings" exists to
+  // prevent. Two kinds, two routes, one gate.
+  return { status: 200, value: { kind: "queue", approvals } };
+}
+
+/**
+ * Record a person's answer — BEHIND DESK LOGIN (desk#65).
  *
  * The seam is `mayAnswer`, one named predicate in questions.js, and it is
  * consulted BEFORE the body is read: a door that is shut should not be able to
- * store anything a caller sent it, even by accident. 501 rather than 401,
- * because 401 invites a caller to present a credential and there is none to
- * present — the capability does not exist yet on any deployment.
+ * store anything a caller sent it, even by accident.
  *
- * Everything below the seam is real and unit-tested (`answerQuestion`); it is
- * wired here so that landing desk#65 is a change to `mayAnswer` and nothing
- * else.
+ * 401 now, where it was 501. The old status was right for the old reason — 401
+ * invites a caller to present a credential, and there was none to present on any
+ * deployment — and it inverts the moment one exists. The status comes from the
+ * predicate rather than from reading its sentence: 403 is a credential that is
+ * no longer live, which is a different thing to tell a person than "sign in".
  */
 export async function handleAnswer(request, env, id) {
-  const no = (status, error) =>
+  const no = (status, error, extra = {}) =>
     new Response(JSON.stringify({ error }) + "\n", {
       status,
-      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra },
     });
 
   if (!env.SUBSCRIPTIONS) return no(503, "no subscription store is configured on this deployment");
 
-  const may = mayAnswer(request, env);
-  if (!may.ok) return no(501, may.reason);
+  const may = await mayAnswer(request, env);
+  // The STATUS comes from the predicate, not from string-matching its reason:
+  // 401 with no session (there IS a credential to present now, which is exactly
+  // why the old 501 was right then and wrong here), 403 with a credential that
+  // is no longer live, 503 on a deployment that cannot check either. A refusal
+  // that names a dead session also clears it, so the browser stops sending one.
+  if (!may.ok) return no(may.status, may.reason, may.clear ? { "set-cookie": clearedCookie() } : {});
 
   const body = await request.text();
   if (body.length > MAX_QUESTION_BODY) return no(413, "answer too large");
@@ -879,14 +1062,17 @@ async function selectHuman(request, env, id, now) {
     if (!rec) return { status: 404, value: { error: "no such question" } };
     return { status: 200, value: viewOf(rec, now) };
   }
-  // The COLLECTION, on a public surface with no login (desk#65) — see `mayList`.
-  // 501 and not an empty list: "you may not read this" and "there are none" are
-  // different facts, and answering 200 with `questions: []` would state the
-  // second while the first is what is true. Refused before the store is
-  // touched, so a caller who may not read the corpus cannot make us page it.
-  const may = mayList(request, env);
-  if (!may.ok) return { status: 501, value: { kind: "closed", error: may.reason } };
-  return { status: 200, value: { kind: "questions", questions: await questionViews(kv, now) } };
+  // The COLLECTION, behind desk login (desk#65) — see `mayList`. NOT an empty
+  // list: "you may not read this" and "there are none" are different facts, and
+  // answering 200 with `questions: []` would state the second while the first is
+  // what is true. Refused before the store is touched, so a caller who may not
+  // read the corpus cannot make us page it. The status is the predicate's — 401
+  // when nothing was presented, which is now a sentence with a remedy in it.
+  const may = await mayList(request, env);
+  if (!may.ok) return { status: may.status, clear: may.clear, private: true, value: { kind: "closed", error: may.reason } };
+  // Gated, so it is served no-store and Vary: cookie — see `priv` above. The
+  // single question above is NOT: it stays readable at its own address.
+  return { status: 200, private: true, value: { kind: "questions", questions: await questionViews(kv, now) } };
 }
 
 export default {
@@ -937,14 +1123,27 @@ export default {
     }
 
     // Answer one (#69). A DIFFERENT door — see `mayAnswer` in questions.js —
-    // and shut until desk login lands (desk#65). The surface check comes first
-    // anyway, so a wrong-host caller learns nothing about either.
+    // and behind desk login (desk#65). The surface check comes first anyway, so
+    // a wrong-host caller learns nothing about either.
     const answering = request.method === "POST" ? RE_HUMAN_ANSWER.exec(url.pathname) : null;
     if (answering) {
       if (surfaceFor(url.hostname, env) !== "overview") {
         return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
       }
       return await handleAnswer(request, env, answering[1]);
+    }
+
+    // The login doors (desk#65). Above the method gate for the reason the block
+    // above states, and matched as ONE route with ONE surface guard rather than
+    // six copies of it: six copies is six chances to leave one off, and a login
+    // answering on issues/claims/prs would be a passkey prompt on a host that
+    // has no person attached to it.
+    const login = request.method === "POST" ? RE_LOGIN.exec(url.pathname) : null;
+    if (login) {
+      if (surfaceFor(url.hostname, env) !== "overview") {
+        return new Response("not found\n", { status: 404, headers: { "cache-control": "no-store" } });
+      }
+      return await handleLogin(request, env, login[1]);
     }
 
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -1058,9 +1257,24 @@ export default {
       const human = matchHuman(url.pathname);
       if (human) {
         const sel = await selectHuman(request, env, human.id, Date.now());
+        if (sel.private) {
+          // A cookie decided this body, so it is never handed to a shared cache.
+          const extra = sel.clear ? { "set-cookie": clearedCookie() } : {};
+          return human.json
+            ? privJson(sel.value, sel.status, extra)
+            : privHtml(renderHuman(sel.value), sel.status, extra);
+        }
         return human.json
           ? json(sel.value, sel.status, 0)
           : html(renderHuman(sel.value), sel.status, 0);
+      }
+      // The queue (desk#65). Same shape as /human: one selection, two renderings.
+      if (url.pathname === "/queue" || url.pathname === "/queue.json") {
+        const sel = await selectQueue(request, env);
+        const extra = sel.clear ? { "set-cookie": clearedCookie() } : {};
+        return url.pathname === "/queue.json"
+          ? privJson(sel.value, sel.status, extra)
+          : privHtml(renderQueue(sel.value), sel.status, extra);
       }
       if (url.pathname === "/sw.js") {
         return new Response(SERVICE_WORKER, {
@@ -1096,8 +1310,15 @@ export default {
     // question URL would have three impostor resolutions — issues, claims and
     // prs would each answer 200 with their own board for it, which is the
     // wrong-content-type 200 above and a phishing-shaped one besides.
+    //
+    // The login and queue paths join it (desk#65) for the same reason and one
+    // sharper: a /login/start that fell through would answer 200 with a board on
+    // a host that is not the relying party, which is a page inviting a passkey
+    // at an origin the credential was never scoped to.
     if (
       matchHuman(url.pathname) ||
+      /^\/queue(\.json)?$/.test(url.pathname) ||
+      /^\/login(\/|$)/.test(url.pathname) ||
       /^\/(manifest\.webmanifest|sw\.js|notify\.js|offline|icon\.svg|icon-(200|460|1024)\.png|apple-touch-icon(-precomposed)?\.png)$/.test(url.pathname)
     ) {
       return new Response("not found\n", {
