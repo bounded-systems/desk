@@ -70,11 +70,32 @@ test("a caller cannot talk its way up a rung", async () => {
   assert.equal(JSON.parse(await kv.get("question:q1")).answer.rung, ANSWER_RUNG);
 });
 
-test("THE ANSWER DOOR REFUSES, and says which credential it is waiting for", () => {
-  const r = mayAnswer(new Request("https://desk.bounded.tools/human/q1/answer", { method: "POST" }), {});
+test("THE ANSWER DOOR REFUSES A CALLER IT CANNOT NAME, and says which credential it wants", async () => {
+  // An UNCONFIGURED deploy refuses rather than admits: no signing key means the
+  // predicate cannot check a session, and "cannot check" must never read as "no
+  // check needed". 503 names which piece, as every other missing binding does.
+  const unconfigured = await mayAnswer(new Request("https://desk.bounded.tools/human/q1/answer", { method: "POST" }), {});
+  assert.equal(unconfigured.ok, false);
+  assert.equal(unconfigured.status, 503);
+  assert.match(unconfigured.reason, /signing key/);
+
+  // A configured deploy with no cookie: 401, and the sentence names the one
+  // credential that opens it. NOT 501 any more — there IS something to present.
+  const r = await mayAnswer(
+    new Request("https://desk.bounded.tools/human/q1/answer", { method: "POST" }),
+    { SESSION_SECRET: "s", SUBSCRIPTIONS: fakeKv() },
+  );
   assert.equal(r.ok, false);
+  assert.equal(r.status, 401);
   assert.match(r.reason, /desk#65/);
   assert.match(r.reason, /desk login/);
+  // The rungs stay where they are: this door is below `human-authorized` and its
+  // refusal must not borrow that vocabulary.
+  assert.ok(!r.reason.includes("authorized"));
+
+  // A NULL request and a NULL env fail closed rather than throwing — both are
+  // reachable (a call site that forgot an argument is a bug, not an admission).
+  assert.equal((await mayAnswer(null, null)).ok, false);
 });
 
 // ── a human answer and a fired default are DIFFERENT FACTS (#69, rule 3) ─────
@@ -462,14 +483,19 @@ test("the askable set PAGES, and an answered question leaves it", async () => {
 
 // ── the corpus is not public (desk#65) ───────────────────────────────────────
 
-test("LISTING THE CORPUS IS SHUT, on the same reasoning that shut answering", async () => {
-  // desk is public and has no login, so a collection route on it published every
+test("LISTING THE CORPUS NEEDS THE SAME CREDENTIAL ANSWERING DOES", async () => {
+  // Before desk#65 a collection route on a public surface published every
   // prompt, choice set, declared default and address ever asked. `mayAnswer`'s
-  // own comment says desk login gates VIEWING; this is the view half of it.
-  const may = mayList(null, null);
+  // own comment says desk login gates VIEWING; this is the view half of it, and
+  // it is the SAME predicate shape rather than a second policy.
+  const may = await mayList(null, null);
   assert.equal(may.ok, false);
+  assert.equal(may.status, 401);
   assert.match(may.reason, /desk#65/);
   assert.match(may.reason, /not public/);
   // The rungs stay where they are: this is not a door an approval opens either.
   assert.ok(!may.reason.includes("authorized"));
+
+  // And an empty env is a refusal, not a throw and not an admission.
+  assert.equal((await mayList(new Request("https://desk.bounded.tools/human.json"), {})).ok, false);
 });

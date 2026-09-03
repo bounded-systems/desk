@@ -79,6 +79,18 @@
     // host, and refuses any feed that does not name itself front-desk-prs-public.
     "PRS_FEED_URL": "https://raw.githubusercontent.com/bounded-systems/front-desk-feed/feed/front-desk-prs.json",
     "DESK_LIMIT": "25"
+
+    // NOT HERE, and deliberately: SESSION_SECRET, the key desk login's session
+    // cookies are signed with (desk#65). It is a Worker secret, set out of band
+    // like VAPID_PRIVATE_KEY — a var would put it in this file, which is read by
+    // anyone who can read the repo. A deployment without it does not fall back
+    // to unsigned cookies: every gated route answers 503 naming the missing
+    // piece (test/login.test.mjs, "an unconfigured deploy refuses").
+    //
+    // Rotating it invalidates every live session — the cookie is an HMAC over
+    // this string and nothing else — so a rotation is a mass sign-out, not a
+    // silent event. It does NOT invalidate any credential: those are in KV, and
+    // a person signs in again with the same passkey.
   }
 
   // Route + DNS are created by the custom-domain attach above; issues. and claims.

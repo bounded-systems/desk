@@ -1,0 +1,25 @@
+{
+  "file": "webauthn.mjs",
+  "sha256": "56191a3f17afffebe00eba201f4c79f80b1246d2328a449d0d2a826a279e2446",
+  "source": {
+    "repo": "bounded-systems/infra",
+    "path": "cloudflare/keeper/src/webauthn.mjs"
+  },
+  "measured_at": "2026-09-03",
+  "exports": [
+    "FLAGS",
+    "SUPPORTED_ALGS",
+    "b64url",
+    "cborDecode",
+    "coseToCryptoKey",
+    "coseToStoredJwk",
+    "derToRaw",
+    "parseAuthenticatorData",
+    "storedJwkToCryptoKey",
+    "verifyAssertion",
+    "verifyRegistration"
+  ],
+  "what_this_proves": "The vendored bytes in this repo have not been edited since they were copied. It does NOT prove parity with infra: desk's CI has no keeper checkout, so test/vendor-pin.test.mjs can only compare the file against this digest, plus its behavioural conformance checks, which catch a semantic change after the fact rather than preventing one.",
+  "how_to_re-vendor": "Copy the file from infra unchanged, put its new sha256 here, and run node --test test/vendor-pin.test.mjs. A change to the verification LOGIC is an infra PR first; desk never edits its copy.",
+  "what_nothing_proves_yet": "Drift in the OTHER direction is UNWATCHED. Measured 2026-09-03: no workflow in bounded-systems/infra mentions webauthn.mjs, so nothing there reconciles this file against desk's copy and a change to the keeper's own verifier goes red NOWHERE. Closing that is a reconciliation lane in infra (the pattern is .github#310) \u2014 it does not exist, and this file must not be read as though it did. Until it does, the only detection is a person re-vendoring, and test/vendor-pin.test.mjs's behavioural conformance catching a semantic change after the fact."
+}
