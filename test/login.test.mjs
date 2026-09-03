@@ -732,6 +732,30 @@ test("an activation cannot promote a credential revoked while the grant was in f
   assert.equal((await loginStart(kv, {}, Date.now())).ok, false, "and nothing is live to sign in");
 });
 
+// The mirror of the test above, and the reason the re-read compares the status
+// to what it was rather than to a set of allowed values. Once `revoked` became
+// activatable (the desk#65 lockout fix), "is it still activatable?" would have
+// admitted BOTH races — a withdrawal landing during a pending activation, and a
+// second grant landing during a re-admission. Only equality refuses both.
+test("a re-admission cannot spend a second grant on a credential someone else already re-admitted", async () => {
+  const kv = fakeKv();
+  const { credentialId } = await register(kv);
+  await activate(kv, { credentialId, authorizationId: GRANT }, Date.now(), keeper());
+  await revokeCredential(kv, credentialId);
+
+  // Two keyholders re-admit the same credential at once; the slower grant is
+  // spent and must promote nothing, because the record it was redeemed against
+  // is not the record that is there now.
+  const racing = async (url, init) => {
+    await activate(kv, { credentialId, authorizationId: GRANT }, Date.now(), keeper());
+    return keeper()(url, init);
+  };
+  const out = await activate(kv, { credentialId, authorizationId: GRANT }, Date.now(), racing);
+  assert.equal(out.ok, false);
+  assert.equal(out.status, 409);
+  assert.equal((await getCredential(kv, credentialId)).status, "live", "the FIRST re-admission stands");
+});
+
 // ── F. THE DOOR'S COST IS NOT THE ATTACKER'S TO CHOOSE ──────────────────────
 //
 // Registration is open, unauthenticated and unrated by design — the gate is the
@@ -906,13 +930,62 @@ test("revocation also bumps the epoch, so a re-activated credential cannot resur
 
   const old = await mintSession(env.SESSION_SECRET, cred.credentialId, Date.now(), 0);
   await revokeCredential(kv, cred.credentialId);
-  // Put it back live WITHOUT touching the epoch — the shape a future re-activation
-  // would take. The pre-revocation cookie must still be dead.
-  const rec = JSON.parse(await kv.get(`login-cred:${cred.credentialId}`));
-  await kv.put(`login-cred:${cred.credentialId}`, JSON.stringify({ ...rec, status: "live" }));
+  // THE REAL RE-ACTIVATION, not a hand-written imitation of one. This test used
+  // to put the record back to `live` itself and call that "the shape a future
+  // re-activation would take" — which tested the fixture, not the code. Now that
+  // `activate()` admits a revoked credential, exercise it.
+  const back = await activate(kv, { credentialId: cred.credentialId, authorizationId: GRANT }, Date.now(), keeper());
+  assert.equal(back.ok, true, "a keeper grant re-admits a revoked credential");
+  assert.equal((await getCredential(kv, cred.credentialId)).status, "live");
 
   const req = { headers: { get: (h) => (h === "cookie" ? `__Host-desk_session=${old.value}` : null) } };
   assert.equal((await currentCredential(req, env)).ok, false, "a cookie from before the revocation stays dead");
+});
+
+// desk#65 carried item, now closed. `/login/revoke` is gated on a live session
+// rather than a grant — deliberately, so revocation stays reachable when the
+// keeper is down, which is the incident where it is most wanted. The cost was
+// that one stolen session could withdraw every enrolled credential and the
+// lockout was PERMANENT. Making the withdrawal recoverable by the keeper closes
+// that without handing the thief anything: re-admission costs a grant, and a
+// stolen desk session can approve nothing, here or at the keeper.
+test("a revoked credential is recoverable BY A KEEPER GRANT, and by nothing else", async () => {
+  const kv = fakeKv();
+  const { credentialId } = await register(kv);
+  await activate(kv, { credentialId, authorizationId: GRANT }, Date.now(), keeper());
+  await revokeCredential(kv, credentialId);
+  assert.equal((await getCredential(kv, credentialId)).status, "revoked");
+
+  // A refused grant leaves it revoked. This is the anti-vacuity half: without
+  // it, "revoked credentials can be re-admitted" would pass for a version that
+  // re-admitted them unconditionally.
+  const refusing = keeper({ ok: false, status: 403, error: "authorization unknown or already redeemed" });
+  const denied = await activate(kv, { credentialId, authorizationId: GRANT }, Date.now(), refusing);
+  assert.equal(denied.ok, false);
+  assert.equal((await getCredential(kv, credentialId)).status, "revoked", "a refused grant changes nothing");
+
+  const back = await activate(kv, { credentialId, authorizationId: GRANT }, Date.now(), keeper());
+  assert.equal(back.ok, true);
+  const rec = await getCredential(kv, credentialId);
+  assert.equal(rec.status, "live");
+  assert.ok(rec.reactivatedAt, "the re-admission is recorded");
+  assert.equal(rec.revokedAt, undefined, "`revokedAt` means CURRENTLY withdrawn, so it is cleared");
+});
+
+test("re-activation does not roll the epoch back", async () => {
+  // The bug this pins is a plausible tidy-up: writing a fresh record on
+  // re-admission, or resetting `sessionEpoch` to 0, would resurrect every
+  // session the revocation killed. `revokeCredential` bumps the epoch for
+  // exactly this reason, so the bump must survive the round trip.
+  const kv = fakeKv();
+  const { credentialId } = await register(kv);
+  await activate(kv, { credentialId, authorizationId: GRANT }, Date.now(), keeper());
+  await revokeCredential(kv, credentialId);
+  const revoked = await getCredential(kv, credentialId);
+  await activate(kv, { credentialId, authorizationId: GRANT }, Date.now(), keeper());
+  const relived = await getCredential(kv, credentialId);
+  assert.equal(relived.sessionEpoch, revoked.sessionEpoch, "the epoch carries forward unchanged");
+  assert.ok(relived.sessionEpoch > 0, "and it is the BUMPED one, not a default zero");
 });
 
 test("an epoch-less cookie is honoured, so a deploy does not sign everyone out", async () => {

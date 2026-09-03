@@ -365,8 +365,24 @@ export function deskCredentialRequestFor(credential) {
   };
 }
 
+// The two states a keeper grant may promote to `live`.
+//
+// `revoked` is in here deliberately (desk#65 carried item). Revocation is gated
+// on a live session, not on a grant, because a rule that needed the keeper to be
+// up would put revocation out of reach in exactly the incident where it is
+// wanted. The stated cost was that ONE STOLEN SESSION COULD WITHDRAW EVERY
+// ENROLLED CREDENTIAL and the lockout was permanent, since nothing could undo a
+// revocation.
+//
+// Making a withdrawal recoverable BY THE KEEPER closes that without weakening
+// anything: re-activation still costs a grant, so a stolen desk session — which
+// can approve nothing, here or at the keeper — cannot perform one. No new
+// authority is created; the authority that already decides who may hold a
+// credential simply also decides who may hold one again.
+const ACTIVATABLE = new Set(["pending", "revoked"]);
+
 /**
- * Promote a pending credential by redeeming a keeper grant.
+ * Promote a pending — or re-admit a revoked — credential by redeeming a keeper grant.
  *
  * `fetchImpl` is a seam for tests, not for configuration: the keeper's origin is
  * a literal above, so nothing a caller sends decides who is asked.
@@ -377,7 +393,9 @@ export async function activate(kv, { credentialId, authorizationId } = {}, now =
     return refuse(400, "authorizationId must be base64url");
   }
   const pending = await getCredential(kv, credentialId);
-  if (!pending || pending.status !== "pending") return refuse(404, "no pending credential by that id");
+  if (!pending || !ACTIVATABLE.has(pending.status)) {
+    return refuse(404, "no pending or revoked credential by that id");
+  }
 
   let res;
   let body;
@@ -412,9 +430,27 @@ export async function activate(kv, { credentialId, authorizationId } = {}, now =
   // shape as loginFinish's write-back below). Refusing here spends the grant
   // without promoting anything, which is the safe direction: the credential stays
   // whatever the store now says it is.
+  // THE STATUS MUST BE UNCHANGED, not merely activatable. Both halves matter and
+  // the second one is not obvious:
+  //
+  //   pending  -> still pending  -> live      a normal activation
+  //   revoked  -> still revoked  -> live      a DELIBERATE re-admission
+  //   pending  -> revoked in flight -> 409    a revocation must win the race
+  //   revoked  -> live in flight    -> 409    someone else already re-admitted it
+  //
+  // Admitting any activatable status here would have made the third line legal,
+  // because `revoked` is now in ACTIVATABLE — a grant redeemed against a PENDING
+  // record would have overridden a withdrawal that landed during the round trip.
+  // That is the `live <- revoked` transition three reviewers flagged on desk#65,
+  // reintroduced through the front door by the fix for the lockout. Caught by the
+  // test written for the original: "an activation cannot promote a credential
+  // revoked while the grant was in flight".
+  //
+  // The distinction the equality encodes: re-admission is an ACT, begun against a
+  // record already revoked, not an outcome a race can produce.
   const current = await getCredential(kv, pending.credentialId);
-  if (!current || current.status !== "pending") {
-    return refuse(409, "that credential is no longer pending — it changed while the grant was being redeemed");
+  if (!current || current.status !== pending.status) {
+    return refuse(409, `that credential is no longer ${pending.status} — it changed while the grant was being redeemed`);
   }
 
   const live = {
@@ -424,6 +460,19 @@ export async function activate(kv, { credentialId, authorizationId } = {}, now =
     approvedBy: typeof record.credentialId === "string" ? record.credentialId : null,
     activatedAt: now,
   };
+  // RE-ACTIVATION KEEPS THE EPOCH IT INHERITED. `revokeCredential` bumped
+  // `sessionEpoch`, and `...current` carries that bump forward — so every cookie
+  // minted before the withdrawal stays refused at admission. Resetting or
+  // omitting it here would resurrect exactly the sessions revocation existed to
+  // kill, which is why revokeCredential bumps it rather than relying on `status`
+  // alone. Do not "tidy" this into a fresh epoch.
+  if (current.status === "revoked") {
+    live.reactivatedAt = now;
+    // Cleared so `revokedAt` always means "currently withdrawn, since". The
+    // history is not lost: `reactivatedAt` records that this happened, and the
+    // bumped epoch is durable evidence that a withdrawal took effect.
+    delete live.revokedAt;
+  }
   // No expirationTtl, deliberately: the pending record carried one and this
   // write is what makes the credential durable.
   await putCredential(kv, live);
