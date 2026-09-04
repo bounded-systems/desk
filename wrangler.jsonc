@@ -78,6 +78,12 @@
     // (scripts/prs.sh) — the Worker refuses to render it anywhere but the prs
     // host, and refuses any feed that does not name itself front-desk-prs-public.
     "PRS_FEED_URL": "https://raw.githubusercontent.com/bounded-systems/front-desk-feed/feed/front-desk-prs.json",
+    // Repo health (desk#81): the repo-standard conformance snapshot, published
+    // daily by bounded-systems/.github (its #381 lane) as main plus one API
+    // commit on a branch of the repo that owns the standard. The Worker refuses
+    // to render it anywhere but the overview's repo-health section, and refuses
+    // any feed that does not name itself repo-standard-conformance.
+    "CI_FEED_URL": "https://raw.githubusercontent.com/bounded-systems/.github/repo-standard-conformance/repo-standard-conformance.json",
     "DESK_LIMIT": "25"
 
     // NOT HERE, and deliberately: SESSION_SECRET, the key desk login's session

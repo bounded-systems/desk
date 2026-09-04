@@ -308,12 +308,27 @@ const section = (key, host, o = {}) => ({
   items: [{ repo: "bounded-systems/prx", number: 434, title: `${key} row`, url: "https://e/1", note: "n" }],
   ...o,
 });
+// Repo health (desk#81): rows are repos, not issues — no number — and the
+// section carries the lane's totals for the summary sentence.
+const ciSection = (o = {}) => section("ci", "github.com/bounded-systems/.github", {
+  href: "https://raw.example/ci.json",
+  totals: {
+    rows: 90, caller: { present: 49, absent: 40, unreadable: 1 },
+    standard_run: { green: 49, red: 0, other: 0, none: 0, unreadable: 0 }, findings: 42, gaps: 3,
+  },
+  standard: "green",
+  count: 42, shown: 1,
+  items: [{ repo: "bounded-systems/bare", number: null, title: "does not call the standard CI",
+    url: "https://github.com/bounded-systems/bare", note: "1" }],
+  ...o,
+});
 const overview = (o = {}) => ({
   ok: true, generated_at: "2026-08-25T12:00:00Z", head: 5,
   sections: [
     section("issues", "issues.bounded.tools"),
     section("claims", "claims.bounded.tools"),
     section("prs", "prs.bounded.tools"),
+    ciSection(),
   ],
   ...o,
 });
@@ -691,4 +706,28 @@ test("no motion ships without a reduced-motion guard", async () => {
     }
   }
   assert.equal(declared, guarded, `${declared} motion declarations, ${guarded} inside a reduced-motion guard`);
+});
+
+// ── repo health on the overview (desk#81) ────────────────────────────────────
+
+test("the repo-health section links to its snapshot, says its denominator, and rows carry no number", () => {
+  const html = renderOverview(overview(), AT, 60);
+  assert.match(html, /Repo health/);
+  assert.ok(html.includes('href="https://raw.example/ci.json"'), "links to the href, not a host");
+  assert.match(html, /49 of 90 public repos call the standard: 49 green, 0 red\. 40 do not call it\. 3 could not be measured\. The standard&#39;s own selftest is green\.|49 of 90 public repos call the standard: 49 green, 0 red\. 40 do not call it\. 3 could not be measured\. The standard's own selftest is green\./);
+  assert.match(html, /does not call the standard CI/);
+  assert.match(html, /42 with findings/);
+  assert.doesNotMatch(html, /repo null/);
+  assert.doesNotMatch(html, /issue null/);
+});
+
+test("a repo-health section with nothing flagged says so, and only then", () => {
+  const html = renderOverview(overview({ sections: [ciSection({ count: 0, items: [] })] }), AT, 60);
+  assert.match(html, /every standard run is green/);
+  const failed = renderOverview(overview({
+    ok: false,
+    sections: [{ key: "ci", host: "github.com/bounded-systems/.github", ok: false, reason: "feed responded 504", count: null, items: [] }],
+  }), AT, 60);
+  assert.doesNotMatch(failed, /every standard run is green/);
+  assert.match(failed, /feed responded 504/);
 });

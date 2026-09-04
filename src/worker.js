@@ -34,6 +34,7 @@ import {
   select,
   selectClaims,
   selectPrs,
+  selectCi,
   selectOverview,
   DEFAULT_LIMIT,
   FeedError,
@@ -1335,9 +1336,12 @@ export default {
       // No destination is baked in: where the filtered feeds are published is a
       // maintainer decision (see site#241), so they arrive as configuration and
       // an absent one is reported rather than guessed at.
-      const [board, prsFeed] = await Promise.all([
+      const [board, prsFeed, ciFeed] = await Promise.all([
         readFeed(env.FEED_URL, "FEED_URL"),
         readFeed(env.PRS_FEED_URL, "PRS_FEED_URL"),
+        // Repo health (desk#81): the conformance snapshot the standard's own
+        // repo publishes. Fails closed per section like the other two.
+        readFeed(env.CI_FEED_URL, "CI_FEED_URL"),
       ]);
       // Both issue-side sections read the SAME feed — one origin read, and the
       // two pages can never disagree about which snapshot they are describing.
@@ -1345,6 +1349,7 @@ export default {
         issues: selected(board, (f) => select(f, limit)),
         claims: selected(board, selectClaims),
         prs: selected(prsFeed, selectPrs),
+        ci: selected(ciFeed, selectCi),
       });
       const status = overview.ok ? 200 : 502;
       return wantsJson

@@ -5,7 +5,8 @@
 //   issues.bounded.tools   what is worth picking up          select()
 //   claims.bounded.tools   what someone is already on        selectClaims()
 //   prs.bounded.tools      what is open and awaiting a check selectPrs()
-//   desk.bounded.tools     all three at a glance             selectOverview()
+//   desk.bounded.tools     all three at a glance, plus       selectOverview()
+//                          repo health from the standard CI  selectCi()
 //
 // THE RANK IS THE BOARD'S. Nothing here scores. `Score` is carried through
 // unchanged and only sorted on; a ranking computed here would be a different
@@ -246,8 +247,87 @@ export function selectPrs(feed) {
   };
 }
 
+// ── repo health (desk#81) ────────────────────────────────────────────────────
+
 /**
- * Compose the three selections into the front door — desk.bounded.tools.
+ * Where the repo-standard conformance snapshot is published — `.github`#381's
+ * lane, daily, as main plus one API commit on a branch of the repo that owns
+ * the standard. Until a host of its own exists, the section links here.
+ */
+export const CI_SNAPSHOT_URL =
+  "https://raw.githubusercontent.com/bounded-systems/.github/repo-standard-conformance/repo-standard-conformance.json";
+export const CI_SECTION_HOST = "github.com/bounded-systems/.github";
+
+/**
+ * The finding codes the conformance lane emits, as sentences. A code this file
+ * does not know passes through AS WRITTEN rather than being dropped: the lane
+ * may grow a finding before this page learns its name, and an unnamed finding
+ * is still a finding.
+ */
+export const FINDING_COPY = {
+  "caller-absent": "does not call the standard CI",
+  "pin-not-sha": "calls the standard at a ref that is not a commit SHA",
+  "pull-request-missing": "the caller has no pull_request trigger",
+  "pull-request-filtered": "the caller's pull_request trigger is path-filtered, so it does not report on every PR",
+  "pull-request-no-synchronize": "the caller's pull_request trigger does not re-run on a push",
+  "test-lane-absent": "carries a toolchain but no test lane — its tests, if any, gate nothing",
+  "standard-run-red": "the latest standard run on its default branch is red",
+};
+
+/**
+ * Reduce the conformance snapshot to the repos with findings — the fourth
+ * section of desk.bounded.tools.
+ *
+ * NOTHING IS RE-COUNTED. `totals` are the lane's own and are carried through
+ * as published; this page sorts and truncates. A FINDING is the repo's (no
+ * caller, an unpinned ref, a red run); a GAP is the lane's (a listing it could
+ * not read). The lane keeps them in separate fields and never sums them, and
+ * neither does this — `count` is repos with findings, and the gaps ride along
+ * in `totals` for the summary line to say out loud.
+ *
+ * Worst first: most findings, then name — the same order the lane publishes.
+ */
+export function selectCi(feed) {
+  requireBoardFeed(
+    feed,
+    "repo-standard-conformance",
+    "Only the conformance snapshot may be rendered as repo health — any other feed is the wrong page's data.",
+  );
+
+  const repos = Array.isArray(feed.repos) ? feed.repos : [];
+  const t = feed.totals && typeof feed.totals === "object" ? feed.totals : {};
+  const flagged = repos.filter((r) => Array.isArray(r.findings) && r.findings.length > 0);
+  const sorted = [...flagged].sort(
+    (a, b) => b.findings.length - a.findings.length || String(a.repo).localeCompare(String(b.repo)),
+  );
+
+  return {
+    generated_at: feed.generated_at,
+    href: CI_SNAPSHOT_URL,
+    count: sorted.length,
+    totals: {
+      rows: t.rows ?? null,
+      caller: t.caller ?? null,
+      standard_run: t.standard_run ?? null,
+      test_lane: t.test_lane ?? null,
+      findings: t.findings ?? null,
+      gaps: t.gaps ?? null,
+    },
+    // The one "is the org CI good" signal that exists today: the standard's
+    // own selftest on main (`.github`#382 is what it still lacks).
+    standard: feed.standard?.selftest?.state ?? null,
+    items: sorted.map((r) => ({
+      repo: r.repo,
+      url: `https://github.com/${r.repo}`,
+      findings: r.findings,
+      summary: r.findings.map((f) => FINDING_COPY[f] || f).join("; "),
+      standard_run: r.standard_run?.state ?? null,
+    })),
+  };
+}
+
+/**
+ * Compose the four selections into the front door — desk.bounded.tools.
  *
  * TAKES OUTCOMES, NOT FEEDS, and that is the point: each section is fetched and
  * selected independently, so this function is where "one of the three could not
@@ -266,7 +346,7 @@ export function selectPrs(feed) {
  * make one page's "12 claimed" mean the same as another's is for both to be the
  * same expression.
  */
-export function selectOverview({ issues, claims, prs }, head = OVERVIEW_HEAD) {
+export function selectOverview({ issues, claims, prs, ci }, head = OVERVIEW_HEAD) {
   const section = (key, host, outcome, shape) =>
     outcome?.ok
       ? { key, host, ok: true, ...shape(outcome.value), generated_at: outcome.value.generated_at }
@@ -294,6 +374,18 @@ export function selectOverview({ issues, claims, prs }, head = OVERVIEW_HEAD) {
       shown: d.items.length,
       items: d.items.slice(0, head).map((i) => ({
         repo: i.repo, number: i.number, title: i.title, url: i.url, note: `#${i.number}`,
+      })),
+    })),
+    // Repo health (desk#81). No host of its own yet, so `href` points at the
+    // snapshot; rows are repos, not issues, so they carry no number.
+    section("ci", CI_SECTION_HOST, ci, (d) => ({
+      count: d.count,
+      shown: d.items.length,
+      href: d.href,
+      totals: d.totals,
+      standard: d.standard,
+      items: d.items.slice(0, head).map((i) => ({
+        repo: i.repo, number: null, title: i.summary, url: i.url, note: String(i.findings.length),
       })),
     })),
   ];
