@@ -320,7 +320,10 @@ export function selectCi(feed) {
       repo: r.repo,
       url: `https://github.com/${r.repo}`,
       findings: r.findings,
-      summary: r.findings.map((f) => FINDING_COPY[f] || f).join("; "),
+      // hasOwn, not a bare lookup: a code named like an Object.prototype member
+      // ("constructor", "toString") must read as the text it is, not resolve to
+      // a function whose source becomes the sentence.
+      summary: r.findings.map((f) => (Object.hasOwn(FINDING_COPY, f) ? FINDING_COPY[f] : String(f))).join("; "),
       standard_run: r.standard_run?.state ?? null,
     })),
   };

@@ -397,6 +397,9 @@ test("selectCi carries the lane's totals through, and never re-counts them", () 
 test("a finding code this page does not know passes through as written", () => {
   const r = selectCi(ciFeed([ciRepo({ repo: "bounded-systems/n", findings: ["something-new"] })]));
   assert.equal(r.items[0].summary, "something-new");
+  // …including one that happens to name an Object.prototype member.
+  const p = selectCi(ciFeed([ciRepo({ repo: "bounded-systems/p", findings: ["constructor", "toString"] })]));
+  assert.equal(p.items[0].summary, "constructor; toString");
 });
 
 test("a snapshot with no findings is a real answer, not an error", () => {

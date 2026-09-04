@@ -217,7 +217,9 @@ test("the overview's repo-health section reads CI_FEED_URL and names the repos w
   assert.match(html, /Repo health/);
   assert.match(html, /1 of 2 public repos call the standard: 1 green, 0 red\. 1 do not call it\./);
   assert.match(html, /does not call the standard CI/);
-  assert.ok(html.includes("https://github.com/bounded-systems/bare"), "the row links to the repo");
+  // The attribute, not the bare URL: this asserts the LINK TARGET, and a bare
+  // URL substring is what CodeQL reads as sanitization (js/incomplete-url-substring-sanitization).
+  assert.ok(html.includes('href="https://github.com/bounded-systems/bare"'), "the row links to the repo");
   assert.doesNotMatch(html, /repo null/);
 });
 
