@@ -27,9 +27,27 @@ const PRS = {
   items: [{ repo: "bounded-systems/prx", number: 7, title: "a change", url: "https://e/7", labels: [], claimed: false }],
 };
 
+// The repo-standard conformance snapshot (desk#81), the way `.github`'s lane
+// publishes it: one repo with a finding, one clean.
+const CI = {
+  feed: "repo-standard-conformance",
+  generated_at: new Date().toISOString(),
+  totals: {
+    rows: 2, caller: { present: 1, absent: 1, unreadable: 0 },
+    standard_run: { green: 1, red: 0, other: 0, none: 0, unreadable: 0 },
+    test_lane: { present: 1, absent: 1, "n/a": 0, unmeasured: 0 }, findings: 1, gaps: 0,
+  },
+  standard: { selftest: { state: "green" } },
+  repos: [
+    { repo: "bounded-systems/bare", findings: ["caller-absent"], gaps: [], caller: { state: "absent" }, standard_run: null, extra: [] },
+    { repo: "bounded-systems/prx", findings: [], gaps: [], caller: { state: "present" }, standard_run: { state: "green" }, extra: [] },
+  ],
+};
+
 const ENV = {
   FEED_URL: "https://feed.example/board.json",
   PRS_FEED_URL: "https://feed.example/prs.json",
+  CI_FEED_URL: "https://feed.example/ci.json",
   DESK_LIMIT: "25",
 };
 
@@ -37,9 +55,9 @@ let realFetch;
 /** Serve each configured feed, or fail the one the test names. */
 function stubFeeds({ fail = null, status = 500 } = {}) {
   globalThis.fetch = async (url) => {
-    const which = url === ENV.FEED_URL ? "board" : "prs";
+    const which = url === ENV.FEED_URL ? "board" : url === ENV.CI_FEED_URL ? "ci" : "prs";
     if (fail === which) return new Response("nope", { status, statusText: "Server Error" });
-    return new Response(JSON.stringify(which === "board" ? BOARD : PRS), {
+    return new Response(JSON.stringify(which === "board" ? BOARD : which === "ci" ? CI : PRS), {
       status: 200, headers: { "content-type": "application/json" },
     });
   };
@@ -141,7 +159,7 @@ test("/board.json serves that host's selection", async () => {
   const claims = await (await get("claims.bounded.tools", "/board.json")).json();
   assert.deepEqual(claims.items.map((i) => i.number), [2]);
   const overview = await (await get("desk.bounded.tools", "/board.json")).json();
-  assert.deepEqual(overview.sections.map((s) => s.key), ["issues", "claims", "prs"]);
+  assert.deepEqual(overview.sections.map((s) => s.key), ["issues", "claims", "prs", "ci"]);
 });
 
 test("/healthz does not touch the feed, so it answers when the feed does not", async () => {
@@ -188,6 +206,46 @@ test("the overview renders what it could read and 502s on what it could not", as
   assert.match(html, /This section could not be read/);
   assert.match(html, /This overview is incomplete/);
   assert.doesNotMatch(html, /No open pull requests/);
+});
+
+// ── repo health on the overview (desk#81) ────────────────────────────────────
+
+test("the overview's repo-health section reads CI_FEED_URL and names the repos with findings", async () => {
+  const res = await get("desk.bounded.tools");
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /Repo health/);
+  assert.match(html, /1 of 2 public repos call the standard: 1 green, 0 red\. 1 do not call it\./);
+  assert.match(html, /does not call the standard CI/);
+  // The attribute, not the bare URL: this asserts the LINK TARGET, and a bare
+  // URL substring is what CodeQL reads as sanitization (js/incomplete-url-substring-sanitization).
+  assert.ok(html.includes('href="https://github.com/bounded-systems/bare"'), "the row links to the repo");
+  assert.doesNotMatch(html, /repo null/);
+});
+
+test("an unreadable conformance feed keeps its slot and 502s the overview", async () => {
+  stubFeeds({ fail: "ci" });
+  const res = await get("desk.bounded.tools");
+  assert.equal(res.status, 502);
+  const html = await res.text();
+  assert.match(html, /pick me up/);                 // the board sections survived
+  assert.match(html, /This section could not be read/);
+  assert.doesNotMatch(html, /every standard run is green/);   // never the empty sentence
+});
+
+test("the board feed served as CI_FEED_URL is refused, not rendered as repo health", async () => {
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (url, init) =>
+    url === ENV.CI_FEED_URL ? new Response(JSON.stringify(BOARD), { status: 200 }) : inner(url, init);
+  const res = await get("desk.bounded.tools");
+  assert.equal(res.status, 502);
+  assert.match(await res.text(), /expected the 'repo-standard-conformance' feed/);
+});
+
+test("a missing CI_FEED_URL is the Worker's own fault, and says which var", async () => {
+  const res = await get("desk.bounded.tools", "/", { ...ENV, CI_FEED_URL: "" });
+  assert.equal(res.status, 502);
+  assert.match(await res.text(), /CI_FEED_URL is not configured/);
 });
 
 test("the overview reads the board feed once for both board-side sections", async () => {

@@ -12,6 +12,10 @@ board **at request time**, across four hosts.
 | [`prs.bounded.tools`](https://prs.bounded.tools) | what is open and awaiting a check | `selectPrs` |
 | [`desk.bounded.tools`](https://desk.bounded.tools) | all three at a glance — the front door | `selectOverview` |
 
+The front door also carries a fourth section, **Repo health** (#81): which public repos run
+the org's standard CI and whether it passes, read from the snapshot `bounded-systems/.github`
+publishes daily (`selectCi`). It has no host of its own yet, so it links to the snapshot.
+
 One Worker, selected by hostname, because the selection rules **are** the
 product: four Workers would be four deploys, four broker entries, and four
 chances for "claimable" to come to mean four different things.

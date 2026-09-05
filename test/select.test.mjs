@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  select, selectPrs, selectClaims, selectOverview,
-  FeedError, DEFAULT_LIMIT, OVERVIEW_HEAD,
+  select, selectPrs, selectClaims, selectOverview, selectCi,
+  FeedError, DEFAULT_LIMIT, OVERVIEW_HEAD, CI_SNAPSHOT_URL, FINDING_COPY,
 } from "../src/select.js";
 
 const item = (o = {}) => ({
@@ -256,20 +256,50 @@ const boardFeed = feed([
   item({ number: 2, fields: { Status: "Todo", Score: 9 } }),
   claimed({ number: 3, fields: { Status: "In Progress", Score: 1 } }),
 ]);
+// A conformance snapshot the way `.github`'s lane publishes it (desk#81):
+// totals are the lane's, rows carry findings (the repo's) and gaps (the lane's).
+const ciRepo = (o = {}) => ({
+  repo: "bounded-systems/x", findings: [], gaps: [],
+  caller: { state: "present" }, standard_run: { state: "green" }, extra: [],
+  ...o,
+});
+const ciFeed = (repos = [
+  ciRepo({ repo: "bounded-systems/bare", findings: ["caller-absent"], caller: { state: "absent" }, standard_run: null }),
+  ciRepo({ repo: "bounded-systems/clean" }),
+], o = {}) => ({
+  feed: "repo-standard-conformance", generated_at: "2026-09-04T20:38:14Z",
+  totals: {
+    rows: 2, caller: { present: 1, absent: 1, unreadable: 0 },
+    standard_run: { green: 1, red: 0, other: 0, none: 0, unreadable: 0 },
+    test_lane: { present: 1, absent: 1, "n/a": 0, unmeasured: 0 }, findings: 1, gaps: 0,
+  },
+  standard: { selftest: { state: "green" } },
+  repos, ...o,
+});
 const outcomes = (o = {}) => ({
   issues: ok(select(boardFeed)),
   claims: ok(selectClaims(boardFeed)),
   prs: ok(selectPrs(prFeed([prItem({ number: 4 })]))),
+  ci: ok(selectCi(ciFeed())),
   ...o,
 });
 
-test("the overview carries all three sections, in reading order", () => {
+test("the overview carries all four sections, in reading order", () => {
   const r = selectOverview(outcomes());
-  assert.deepEqual(r.sections.map((s) => s.key), ["issues", "claims", "prs"]);
+  assert.deepEqual(r.sections.map((s) => s.key), ["issues", "claims", "prs", "ci"]);
   assert.deepEqual(r.sections.map((s) => s.host), [
-    "issues.bounded.tools", "claims.bounded.tools", "prs.bounded.tools",
+    "issues.bounded.tools", "claims.bounded.tools", "prs.bounded.tools", "github.com/bounded-systems/.github",
   ]);
   assert.equal(r.ok, true);
+  // Repo health has no host of its own yet, so it says where its feed lives.
+  assert.equal(r.sections[3].href, CI_SNAPSHOT_URL);
+});
+
+test("a missing repo-health outcome fails the overview closed, like any other section", () => {
+  const r = selectOverview(outcomes({ ci: undefined }));
+  const ci = r.sections.find((s) => s.key === "ci");
+  assert.equal(ci.ok, false);
+  assert.equal(r.ok, false);
 });
 
 // The whole point of composing rather than re-counting: the overview's number
@@ -280,6 +310,7 @@ test("every count comes from the selector that owns it", () => {
   assert.equal(by.issues.count, select(boardFeed).items.length);
   assert.equal(by.claims.count, selectClaims(boardFeed).count);
   assert.equal(by.prs.count, 1);
+  assert.equal(by.ci.count, selectCi(ciFeed()).count);
 });
 
 test("a section that could not be read keeps its slot and its reason", () => {
@@ -301,12 +332,13 @@ test("the overview's age is the OLDEST readable stamp, not the newest", () => {
     issues: ok(select(feed([], { generated_at: "2026-08-25T10:00:00Z" }))),
     claims: ok(selectClaims(feed([], { generated_at: "2026-08-25T10:00:00Z" }))),
     prs: ok(selectPrs(prFeed([], { generated_at: "2026-08-27T10:00:00Z" }))),
+    ci: ok(selectCi(ciFeed([], { generated_at: "2026-08-26T10:00:00Z" }))),
   });
   assert.equal(r.generated_at, "2026-08-25T10:00:00Z");
 });
 
 test("an overview with nothing readable states no age rather than inventing one", () => {
-  const r = selectOverview({ issues: bad("x"), claims: bad("x"), prs: bad("x") });
+  const r = selectOverview({ issues: bad("x"), claims: bad("x"), prs: bad("x"), ci: bad("x") });
   assert.equal(r.generated_at, null);
   assert.equal(r.ok, false);
 });
@@ -316,9 +348,69 @@ test("each section shows only its head, and says how many it counted", () => {
     item({ number: n, fields: { Status: "Todo", Score: n } })));
   const r = selectOverview({
     issues: ok(select(many)), claims: ok(selectClaims(many)), prs: ok(selectPrs(prFeed([]))),
+    ci: ok(selectCi(ciFeed())),
   });
   const issues = r.sections.find((s) => s.key === "issues");
   assert.equal(issues.items.length, OVERVIEW_HEAD);
   assert.equal(issues.count, 12);
   assert.equal(r.head, OVERVIEW_HEAD);
+});
+
+// ── selectCi — repo health (desk#81) ─────────────────────────────────────────
+
+test("selectCi refuses any feed that is not repo-standard-conformance", () => {
+  assert.throws(() => selectCi(feed([])), FeedError);
+  assert.throws(() => selectCi(prFeed([])), FeedError);
+  assert.throws(() => selectCi(ciFeed([], { feed: "front-desk-public" })), /expected the 'repo-standard-conformance' feed/);
+});
+
+test("selectCi refuses a snapshot it cannot date", () => {
+  assert.throws(() => selectCi(ciFeed([], { generated_at: "yesterday" })), FeedError);
+});
+
+test("selectCi lists only repos with findings, worst first, as sentences", () => {
+  const r = selectCi(ciFeed([
+    ciRepo({ repo: "bounded-systems/clean" }),
+    ciRepo({ repo: "bounded-systems/b", findings: ["caller-absent"] }),
+    ciRepo({ repo: "bounded-systems/a", findings: ["pin-not-sha", "pull-request-filtered"] }),
+  ]));
+  assert.equal(r.count, 2);
+  assert.deepEqual(r.items.map((i) => i.repo), ["bounded-systems/a", "bounded-systems/b"]);
+  assert.equal(r.items[1].summary, FINDING_COPY["caller-absent"]);
+  assert.match(r.items[0].summary, /not a commit SHA; .*path-filtered/);
+  assert.equal(r.items[0].url, "https://github.com/bounded-systems/a");
+  assert.equal(r.href, CI_SNAPSHOT_URL);
+});
+
+test("selectCi carries the lane's totals through, and never re-counts them", () => {
+  // The totals say 5 findings; the rows carry 1. The page shows the lane's
+  // number as the lane's number and its own count as its own — two facts,
+  // not one reconciled by this file.
+  const r = selectCi(ciFeed(undefined, { totals: { ...ciFeed().totals, findings: 5, gaps: 3 } }));
+  assert.equal(r.totals.findings, 5);
+  assert.equal(r.totals.gaps, 3);
+  assert.equal(r.count, 1);
+  assert.deepEqual(r.totals.caller, { present: 1, absent: 1, unreadable: 0 });
+  assert.equal(r.standard, "green");
+});
+
+test("a finding code this page does not know passes through as written", () => {
+  const r = selectCi(ciFeed([ciRepo({ repo: "bounded-systems/n", findings: ["something-new"] })]));
+  assert.equal(r.items[0].summary, "something-new");
+  // …including one that happens to name an Object.prototype member.
+  const p = selectCi(ciFeed([ciRepo({ repo: "bounded-systems/p", findings: ["constructor", "toString"] })]));
+  assert.equal(p.items[0].summary, "constructor; toString");
+});
+
+test("a snapshot with no findings is a real answer, not an error", () => {
+  const r = selectCi(ciFeed([ciRepo({ repo: "bounded-systems/clean" })]));
+  assert.equal(r.count, 0);
+  assert.deepEqual(r.items, []);
+});
+
+test("a snapshot predating totals or repos degrades to empty rather than throwing", () => {
+  const r = selectCi({ feed: "repo-standard-conformance", generated_at: "2026-09-04T20:38:14Z" });
+  assert.equal(r.count, 0);
+  assert.equal(r.totals.rows, null);
+  assert.equal(r.standard, null);
 });

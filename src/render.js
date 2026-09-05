@@ -165,9 +165,11 @@ const row = ({ marker, markerLabel = "", title, url, repo, number, noun, suffix 
               ? `<span class="row__subject">${esc(c.subject)}</span> <span class="row__delta">${esc(c.delta)}</span>`
               : esc(title)
           }</span>
-          <span class="row__where">${vh(" — ")}${esc(shortRepo(repo))}<span aria-hidden="true"> · </span>${vh(
-            noun + " ",
-          )}${esc(number)}${suffix ? `<span aria-hidden="true"> · </span>${esc(suffix)}` : ""}</span>
+          <span class="row__where">${vh(" — ")}${esc(shortRepo(repo))}${
+            number == null
+              ? ""
+              : `<span aria-hidden="true"> · </span>${vh(noun + " ")}${esc(number)}`
+          }${suffix ? `<span aria-hidden="true"> · </span>${esc(suffix)}` : ""}</span>
         </a>
       </li>`;
 };
@@ -663,20 +665,44 @@ const SECTION_COPY = {
     markerLabel: "Status", noun: "issue" },
   prs: { title: "PRs", label: "open", blurb: "changes awaiting a check",
     markerLabel: "Pull request", noun: "pull request" },
+  ci: { title: "Repo health", label: "with findings",
+    blurb: "which public repos run the standard CI, and whether it passes — measured daily by the standard's own repo",
+    markerLabel: "Findings", noun: "repo" },
 };
 
 const EMPTY_COPY = {
   issues: "Nothing claimable right now.",
   claims: "Nothing is claimed right now.",
   prs: "No open pull requests.",
+  ci: "Every public repo calls the standard CI, and every standard run is green.",
 };
+
+/**
+ * The repo-health denominator, said out loud (desk#81). "42 with findings" on
+ * its own hides the fact that matters most — how many repos call the standard
+ * at all, and whether the ones that do are green — so the section carries the
+ * lane's own totals and this turns them into one sentence. Gaps are named as
+ * gaps: "could not be measured" is not "healthy", and the lane keeps them in a
+ * separate field for exactly this reason.
+ */
+function ciSummary(s) {
+  const t = s.totals;
+  if (!t || !t.caller || !t.standard_run) return "";
+  const rows = t.rows ?? "?";
+  const gaps = t.gaps ? ` ${esc(t.gaps)} could not be measured.` : "";
+  const selftest = s.standard ? ` The standard's own selftest is ${esc(s.standard)}.` : "";
+  return `<p class="muted">${esc(t.caller.present)} of ${esc(rows)} public repos call the standard: ${esc(t.standard_run.green)} green, ${esc(t.standard_run.red)} red. ${esc(t.caller.absent)} do not call it.${gaps}${selftest}</p>`;
+}
 
 function overviewSection(s) {
   const copy = SECTION_COPY[s.key] || { title: s.key, label: "", blurb: "", markerLabel: "", noun: "item" };
+  // A section with no host of its own links wherever its feed lives (repo
+  // health links to the snapshot itself until a `ci.` host exists).
+  const link = s.href || `https://${s.host}`;
   // The heading carries the id the <section> points at, so each section is a
   // NAMED landmark rather than three anonymous regions a reader has to count.
   const heading = `<div class="sec__head">
-        <h2 id="${esc(s.key)}-h"><a href="https://${esc(s.host)}">${esc(copy.title)}</a></h2>
+        <h2 id="${esc(s.key)}-h"><a href="${esc(link)}">${esc(copy.title)}</a></h2>
         <p class="sec__n">${s.ok ? `${esc(s.count)} ${esc(copy.label)}` : "unreadable"}</p>
       </div>`;
 
@@ -689,7 +715,7 @@ function overviewSection(s) {
       ${heading}
       <div class="stamp stamp--stale">
         <strong>This section could not be read.</strong> It is not empty — the feed behind
-        <a href="https://${esc(s.host)}">${esc(s.host)}</a> did not answer in a way this page can stand behind,
+        <a href="${esc(link)}">${esc(s.host)}</a> did not answer in a way this page can stand behind,
         so nothing is shown rather than a count that would be made up.
       </div>
       <p class="muted mono">${esc(s.reason)}</p>
@@ -726,12 +752,13 @@ function overviewSection(s) {
   const more = !s.count
     ? ""
     : s.count > s.items.length
-      ? `<p class="muted sec__more">Showing the first ${esc(s.items.length)} of ${esc(s.count)} — the rest are at <a href="https://${esc(s.host)}">${esc(s.host)}</a>.</p>`
-      : `<p class="muted sec__more">All of them, in full, at <a href="https://${esc(s.host)}">${esc(s.host)}</a>.</p>`;
+      ? `<p class="muted sec__more">Showing the first ${esc(s.items.length)} of ${esc(s.count)} — the rest are at <a href="${esc(link)}">${esc(s.host)}</a>.</p>`
+      : `<p class="muted sec__more">All of them, in full, at <a href="${esc(link)}">${esc(s.host)}</a>.</p>`;
 
   return `<section class="sec" id="${esc(s.key)}" aria-labelledby="${esc(s.key)}-h">
       ${heading}
       <p class="muted">${esc(copy.blurb)}</p>
+      ${s.key === "ci" ? ciSummary(s) : ""}
       ${body}
       ${more}
     </section>`;
