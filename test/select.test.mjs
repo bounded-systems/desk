@@ -414,3 +414,18 @@ test("a snapshot predating totals or repos degrades to empty rather than throwin
   assert.equal(r.totals.rows, null);
   assert.equal(r.standard, null);
 });
+
+// ── the dark-factory findings read as sentences (desk#85) ────────────────────
+
+test("selectCi renders the two dark-factory findings as sentences, not slugs", () => {
+  const r = selectCi(ciFeed([
+    ciRepo({ repo: "bounded-systems/ungated", findings: ["gate-absent"] }),
+    ciRepo({ repo: "bounded-systems/unarmed", findings: ["arming-lane-absent"] }),
+  ]));
+  const by = Object.fromEntries(r.items.map((i) => [i.repo.split("/")[1], i.summary]));
+  assert.equal(by.ungated, FINDING_COPY["gate-absent"]);
+  assert.equal(by.unarmed, FINDING_COPY["arming-lane-absent"]);
+  assert.match(by.ungated, /green gates nothing/);
+  assert.match(by.unarmed, /green waits for a person/);
+  assert.doesNotMatch(by.ungated + by.unarmed, /gate-absent|arming-lane-absent/, "no slug leaks into the sentence");
+});

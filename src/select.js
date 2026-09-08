@@ -272,6 +272,10 @@ export const FINDING_COPY = {
   "pull-request-no-synchronize": "the caller's pull_request trigger does not re-run on a push",
   "test-lane-absent": "carries a toolchain but no test lane — its tests, if any, gate nothing",
   "standard-run-red": "the latest standard run on its default branch is red",
+  // The dark-factory pair (.github-private#913 step 4): the first is green that
+  // decides nothing, the second is green that waits for a person.
+  "gate-absent": "calls the standard, but nothing on its default branch requires it — green gates nothing",
+  "arming-lane-absent": "is gated, but nothing arms the merge — green waits for a person",
 };
 
 /**
