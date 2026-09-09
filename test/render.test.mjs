@@ -731,3 +731,23 @@ test("a repo-health section with nothing flagged says so, and only then", () => 
   assert.doesNotMatch(failed, /every standard run is green/);
   assert.match(failed, /feed responded 504/);
 });
+
+// ── repo health: the dark-factory count (desk#85) ────────────────────────────
+
+test("the repo-health summary says how many repos merge on their own green — only when the lane measured it", () => {
+  // A snapshot from before .github#390 carries no gate_ready: no sentence, no "0 of".
+  const before = renderOverview(overview(), AT, 60);
+  assert.doesNotMatch(before, /merge on their own green/);
+  // A measured one prints the lane's count, untouched.
+  const after = renderOverview(overview({
+    sections: [section("issues", "issues.bounded.tools"), section("claims", "claims.bounded.tools"), section("prs", "prs.bounded.tools"),
+      ciSection({ totals: { ...ciSection().totals, gated: 43, arming_lane: 37, gate_ready: 37 } })],
+  }), AT, 60);
+  assert.match(after, /37 merge on their own green \(gated on the standard and the claim, with the arming lane\)\./);
+  // Zero is a measurement too, and prints as one.
+  const none = renderOverview(overview({
+    sections: [section("issues", "issues.bounded.tools"), section("claims", "claims.bounded.tools"), section("prs", "prs.bounded.tools"),
+      ciSection({ totals: { ...ciSection().totals, gate_ready: 0 } })],
+  }), AT, 60);
+  assert.match(none, /0 merge on their own green/);
+});

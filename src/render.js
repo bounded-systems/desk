@@ -691,7 +691,13 @@ function ciSummary(s) {
   const rows = t.rows ?? "?";
   const gaps = t.gaps ? ` ${esc(t.gaps)} could not be measured.` : "";
   const selftest = s.standard ? ` The standard's own selftest is ${esc(s.standard)}.` : "";
-  return `<p class="muted">${esc(t.caller.present)} of ${esc(rows)} public repos call the standard: ${esc(t.standard_run.green)} green, ${esc(t.standard_run.red)} red. ${esc(t.caller.absent)} do not call it.${gaps}${selftest}</p>`;
+  // The dark-factory count is printed only when the lane measured it: a snapshot
+  // older than .github#390 carries no `gate_ready`, and "0 of N" would be a claim
+  // the lane never made.
+  const dark = Number.isInteger(t.gate_ready)
+    ? ` ${esc(t.gate_ready)} merge on their own green (gated on the standard and the claim, with the arming lane).`
+    : "";
+  return `<p class="muted">${esc(t.caller.present)} of ${esc(rows)} public repos call the standard: ${esc(t.standard_run.green)} green, ${esc(t.standard_run.red)} red. ${esc(t.caller.absent)} do not call it.${dark}${gaps}${selftest}</p>`;
 }
 
 function overviewSection(s) {
