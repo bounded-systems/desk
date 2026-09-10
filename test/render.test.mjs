@@ -751,3 +751,35 @@ test("the repo-health summary says how many repos merge on their own green — o
   }), AT, 60);
   assert.match(none, /0 merge on their own green/);
 });
+
+// ── feed → selectCi → selectOverview → renderOverview, whole path (desk#88) ─
+//
+// #86's render test built the section by hand with `gate_ready` present, and the
+// select tests never asserted the field survived the projection — so the live
+// page shipped without the count. This reads the whole path from a feed.
+
+import { selectCi, selectOverview, select, selectClaims } from "../src/select.js";
+
+test("a feed carrying gate_ready reaches the rendered summary through the real selection path", () => {
+  const feed = {
+    feed: "repo-standard-conformance", generated_at: "2026-09-09T23:00:00Z",
+    totals: {
+      rows: 90, caller: { present: 49, absent: 41, unreadable: 0 },
+      standard_run: { green: 49, red: 0, other: 0, none: 0, unreadable: 0 },
+      test_lane: { present: 40, absent: 9, "n/a": 41, unmeasured: 0 }, findings: 96, gaps: 1,
+      gated: 43, arming_lane: 37, gate_ready: 37,
+    },
+    standard: { selftest: { state: "green" } },
+    repos: [{ repo: "bounded-systems/dot", findings: ["arming-lane-absent"], gaps: [], caller: { state: "present" }, standard_run: { state: "green" } }],
+  };
+  const ok = (value) => ({ ok: true, value });
+  const board = { feed: "front-desk-public", generated_at: "2026-09-09T23:00:00Z", items: [] };
+  const overview = selectOverview({
+    issues: ok(select(board)), claims: ok(selectClaims(board)),
+    prs: ok(selectPrs({ feed: "front-desk-prs-public", generated_at: "2026-09-09T23:00:00Z", items: [] })),
+    ci: ok(selectCi(feed)),
+  });
+  const html = renderOverview(overview, new Date("2026-09-09T23:05:00Z"), 60);
+  assert.match(html, /37 merge on their own green/);
+  assert.match(html, /green waits for a person/);
+});

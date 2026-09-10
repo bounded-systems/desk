@@ -316,6 +316,12 @@ export function selectCi(feed) {
       test_lane: t.test_lane ?? null,
       findings: t.findings ?? null,
       gaps: t.gaps ?? null,
+      // The dark-factory trio (.github#390): carried through like the rest, so
+      // the summary can say how many repos merge on their own green. A feed
+      // older than #390 has none, and null is what the renderer keys off (#88).
+      gated: t.gated ?? null,
+      arming_lane: t.arming_lane ?? null,
+      gate_ready: t.gate_ready ?? null,
     },
     // The one "is the org CI good" signal that exists today: the standard's
     // own selftest on main (`.github`#382 is what it still lacks).
