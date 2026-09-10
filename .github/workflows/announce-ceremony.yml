@@ -1,0 +1,146 @@
+# Announce that a keeper ceremony is open, to a phone — from a repo a cold
+# session can reach (#91).
+#
+# ── This is a second handle on `.github`'s lane, not a new mechanism ─────────
+# `bounded-systems/.github` has carried `announce-ceremony.yml` since #305 and
+# its header is the design; the body below is that file's, essentially
+# unchanged. What is new is only WHERE IT LIVES, and that is the whole point:
+# `claim-ceremony.mjs` runs in a session, prints an approval URL, and asks for a
+# tap — and a session created without `.github` attached can dispatch neither
+# the claim door nor the lane that rings the phone about it. `add_repo` refuses
+# dot-prefixed names, so the two doors had to move to a repo it accepts.
+#
+# MEASURED 2026-09-10, and this is the part worth keeping: the ceremony client
+# at `.github` main (a0330ae, after #395) could not announce even from a session
+# that HAS `.github` attached — the dispatch answered HTTP 403 through the
+# egress proxy. So the reachability problem is not only about which repos were
+# attached at session creation; the injected credential a cloud session carries
+# is refused on `.github` paths in cases the client cannot enumerate from
+# inside. A door in an ordinary repo is reachable in strictly more of those
+# cases than a door in a dot-named one.
+#
+# ── Why a workflow exists to send one HTTP request ───────────────────────────
+# Because a session cannot send it. `POST /approval` on desk is authorized by a
+# GitHub Actions OIDC token pinned to NOTIFY_WORKFLOW_REFS (desk#37), and a
+# session is not a workflow and holds no such token. That is the door working.
+#
+# Four ceremonies lapsed unapproved on 2026-08-30 for want of exactly this. This
+# lane is the smallest thing that closes it; the real repair is infra#551, which
+# stops holding a runner at all.
+#
+# ── THIS LANE IS INERT UNTIL desk's OWN ALLOWLIST NAMES IT ───────────────────
+# `NOTIFY_WORKFLOW_REFS` in `src/oidc.js` is a committed constant, and
+# `job_workflow_ref` names ONE FILE at ONE REF — so this file's ref is not
+# covered by the entry `.github`'s copy has. Until a reviewed commit adds it,
+# every run here ends at the 403 branch below and reports, in green, that the
+# deployed Worker will not take its notice yet. That is a DESIGNED state, not a
+# fault: the remedy is a desk change plus a deploy, and a red run would say
+# "retry me", which is false.
+#
+# Deliberately not done in the PR that adds this file. Adding a ref to that list
+# is widening the set of workflows that can notify every subscribed device, and
+# it should be its own reviewed diff rather than a line riding along with the
+# lane that benefits from it.
+#
+# ── What stops this being a phishing surface ─────────────────────────────────
+# A session choosing what notification a human receives is precisely the shape
+# worth worrying about. It is already answered, and NOT by this file: desk's
+# `validateApproval` refuses any URL whose host is not `keeper.bounded.tools`
+# (`src/pending.js`). A caller can announce THAT an approval is waiting and
+# point at the keeper; it cannot point anywhere else.
+#
+# And the notice is never the decision. It links to the keeper's page, which
+# renders what the relying party parsed and demands `userVerification:
+# required`. `docs/human-dispatch.md`: "A notification may link to a decision.
+# It may never be one."
+#
+# ── Inputs are DATA, never shell ─────────────────────────────────────────────
+# Every input reaches `jq` as `--arg` from step `env`, never interpolated into
+# `run:` text. `${{ }}` inside a shell body is the injection the org's
+# push-safe-inputs check exists to forbid, and dispatch inputs are attacker-
+# reachable by construction here: any actor who can dispatch can set them.
+name: announce-ceremony
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: Notification title, e.g. "Approve a claim on desk#61"
+        required: true
+        type: string
+      body:
+        description: One line saying what approving this does. Desk caps the payload at 400 chars.
+        required: true
+        type: string
+      url:
+        description: The keeper approval URL. Desk refuses any other host.
+        required: true
+        type: string
+
+# The org default. The one job below adds `id-token: write` for the OIDC mint
+# and nothing else — narrower than `.github`'s copy, which grants both at the top.
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize, do not cancel. Each announcement is about a DIFFERENT ceremony,
+  # and desk's /pending is one slot: a cancelled run is a ceremony nobody hears
+  # about, which is the failure this lane exists to prevent.
+  group: announce-ceremony
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write # the only thing this lane needs: an OIDC token desk will accept
+    steps:
+      - name: Push the notice to subscribed devices
+        env:
+          NOTICE_TITLE: ${{ inputs.title }}
+          NOTICE_BODY: ${{ inputs.body }}
+          NOTICE_URL: ${{ inputs.url }}
+        run: |
+          set -euo pipefail
+          summary() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          tok="$(curl -sS --max-time 20 \
+                   -H "authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" \
+                   "${ACTIONS_ID_TOKEN_REQUEST_URL:-}&audience=https://desk.bounded.tools" \
+                 | jq -r '.value // empty' || true)"
+          if [ -z "$tok" ]; then
+            summary "Approval notice: **failed** — no OIDC token. This lane has one job; it did not do it."
+            exit 1
+          fi
+
+          payload="$(jq -nc --arg t "$NOTICE_TITLE" --arg b "$NOTICE_BODY" --arg u "$NOTICE_URL" \
+            '{title:$t, body:$b, url:$u}')"
+
+          code="$(curl -sS --max-time 30 -o /tmp/appr.json -w '%{http_code}' -X POST \
+                    -H "authorization: Bearer $tok" -H 'content-type: application/json' \
+                    -d "$payload" https://desk.bounded.tools/approval || true)"
+
+          case "$code" in
+            200)
+              summary "$(jq -r '"Approval notice: sent \(.sent)/\(.total) — pruned \(.pruned), failed \(.failed)"' /tmp/appr.json)"
+              ;;
+            # DESIGNED STATES of desk, not faults here: 403 this lane is not in
+            # NOTIFY_WORKFLOW_REFS yet, 405 the deployed Worker predates
+            # /approval (this router answers `method not allowed`, never 404,
+            # for an unmatched path), 503 no subscription store, 404 a moved
+            # host. Green, because the remedy is a desk deploy, not a re-run.
+            403|404|405|503)
+              summary "Approval notice: not available on the deployed Worker yet (HTTP $code)."
+              ;;
+            *)
+              # RED, deliberately, unlike the infra lanes that carry this step
+              # beside other work. A lane whose only purpose is to notify and
+              # which notified nobody must not report success — a green run that
+              # sent nothing is the silent failure this repo has the least
+              # tolerance for.
+              summary "Approval notice: **failed** — desk answered ${code:-no response}."
+              exit 1
+              ;;
+          esac
