@@ -38,23 +38,45 @@
 # here is the plumbing (inputs, preflight, the mint, the gh calls); what is
 # emphatically not is the thing that decides whether an authorization is good.
 #
-# ── WHAT THIS COPY WEAKENS, stated rather than discovered later ──────────────
-# THE RACE SERIALIZER NO LONGER COVERS EVERY DOOR. `concurrency` groups are
-# scoped per REPOSITORY, so the group below serializes runs of THIS file against
-# each other — not against `.github`'s copy. Two claims for the same issue, one
-# dispatched at each door at the same moment, can both read the issue as
-# unclaimed before either writes, and both finish green. In `.github`'s
-# single-door world the second run saw the first's label and failed naming the
-# holder; that guarantee is now narrower than it was.
+# ── WHAT THIS COPY INHERITS, stated rather than discovered later ─────────────
+# THE RACE SERIALIZER HAS NEVER COVERED EVERY DOOR, and this file does not
+# change that — it is the third door to sit behind the same gap, not the one
+# that opens it. Look for no regression in this diff; there is none to find.
 #
-# What still holds: the already-claimed check, the fail-closed re-read after the
-# write, and the fact that the label is idempotent. What a genuine cross-door
-# race produces is TWO claim comments on one issue, both truthful about
-# themselves, which is a visible mess rather than a silent one. The real repair
-# is a single door with a lease behind it (the board-parity family), not more
-# workflow plumbing — and until then the honest reading is that this window
-# excludes reliably against every caller using the SAME door and best-effort
-# against a caller using the other one.
+# `concurrency` groups are scoped per REPOSITORY. That alone means no pair of
+# doors in different repos has ever serialized against another, and the two that
+# already existed do not even produce the same group STRING: `claim-ticket.yml`
+# in `.github` groups on `claim-${{ inputs.repo }}-${{ inputs.issue }}` (a plain
+# repo name), while `_claim.yml` behind `.github-private`'s `claim.yml` groups on
+# `claim-${{ github.repository }}-${{ inputs.issue }}` (an owner/repo pair, and
+# the CALLER's at that). Two doors, two group namespaces, no serialization
+# between them — measured, not inferred.
+#
+# So the group below serializes runs of THIS file against each other and nothing
+# else, exactly as its two predecessors do. Two claims for one issue dispatched
+# at two doors at the same moment can both read the issue as unclaimed before
+# either writes, and both finish green. What this PR widens is the OVERLAP: the
+# pre-existing pair could collide only on a `.github-private` issue, and this
+# door covers every repo, as `.github`'s copy does.
+#
+# WHAT DOES NOT SAVE IT, and this is the part worth being exact about: the
+# read-back at the end of the claim step asserts that A claim is recorded, not
+# that THIS run's is. The label add is idempotent, so under a genuine race both
+# racers re-read a label, both find one, and both report success. The check is
+# honest about what it checks — that the record is READABLE rather than that the
+# writes returned 2xx — but it is not an ownership test and must not be read as
+# one.
+#
+# What a race therefore produces is TWO claim comments on one issue, each
+# truthful about itself: a visible mess rather than a silent one. The repair is
+# to assert SOLE ownership (re-read the claim comments, order by `created_at`
+# then comment id, withdraw if the earliest is not your claimant), which is
+# deterministic and works across doors and repos — written up as
+# `bounded-systems/.github`#402, together with extracting this record logic into
+# a `_claim-ticket.yml` reusable so it stops being copied at all. Neither is
+# implemented here. Until then the honest reading is that this window excludes
+# reliably against callers using the SAME door and best-effort against a caller
+# using another.
 #
 # ── The identity, and why this run may fail at the mint ──────────────────────
 # `front-desk-claim` is a broker entry pinned by OIDC subject, and the subject

@@ -10,14 +10,25 @@
 # the claim door nor the lane that rings the phone about it. `add_repo` refuses
 # dot-prefixed names, so the two doors had to move to a repo it accepts.
 #
-# MEASURED 2026-09-10, and this is the part worth keeping: the ceremony client
-# at `.github` main (a0330ae, after #395) could not announce even from a session
-# that HAS `.github` attached — the dispatch answered HTTP 403 through the
-# egress proxy. So the reachability problem is not only about which repos were
-# attached at session creation; the injected credential a cloud session carries
-# is refused on `.github` paths in cases the client cannot enumerate from
-# inside. A door in an ordinary repo is reachable in strictly more of those
-# cases than a door in a dot-named one.
+# MEASURED 2026-09-10, and stated narrowly because the follow-up probe took the
+# obvious reading away: the ceremony client at `.github` main (a0330ae, after
+# #395) could not announce even from a session that HAS `.github` attached — the
+# dispatch answered HTTP 403 through the egress proxy. Re-probed against
+# `.github`, `desk` and `.github-private` with a workflow file that does not
+# exist, ALL THREE answer the same 403 `Resource not accessible by integration`
+# (table on `.github`#394). So the proxy-injected credential holds no Actions
+# write scope anywhere, and repo attachment is not the variable in that result.
+#
+# WHICH MEANS THE 403 IS NOT THE ARGUMENT FOR THIS FILE. It measures the
+# session's OWN injected credential, and that credential cannot dispatch any
+# door in any repo — dot-named or not. The argument for moving the door is the
+# other credential: a session driven through a GitHub tool holds one this
+# process cannot read, it dispatches workflows routinely, and it can only reach
+# repos the session has attached — which `add_repo` refuses to do for a
+# dot-prefixed name. That refusal is the whole cold-start gap. The 403 is a
+# separate true fact about a separate credential, kept here because it is the
+# one a reader of `claim-ceremony.mjs`'s hand-off will hit first and otherwise
+# misread as this door being broken.
 #
 # ── Why a workflow exists to send one HTTP request ───────────────────────────
 # Because a session cannot send it. `POST /approval` on desk is authorized by a
