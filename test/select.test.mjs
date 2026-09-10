@@ -429,3 +429,14 @@ test("selectCi renders the two dark-factory findings as sentences, not slugs", (
   assert.match(by.unarmed, /green waits for a person/);
   assert.doesNotMatch(by.ungated + by.unarmed, /gate-absent|arming-lane-absent/, "no slug leaks into the sentence");
 });
+
+// ── the dark-factory totals survive the projection (desk#88) ─────────────────
+
+test("selectCi carries gated / arming_lane / gate_ready through, and a feed without them yields null", () => {
+  const measured = selectCi(ciFeed(undefined, { totals: { ...ciFeed().totals, gated: 43, arming_lane: 37, gate_ready: 37 } }));
+  assert.equal(measured.totals.gated, 43);
+  assert.equal(measured.totals.arming_lane, 37);
+  assert.equal(measured.totals.gate_ready, 37);
+  const older = selectCi(ciFeed());
+  assert.equal(older.totals.gate_ready, null, "a snapshot from before .github#390 carries no count, and null is what the renderer keys off");
+});
