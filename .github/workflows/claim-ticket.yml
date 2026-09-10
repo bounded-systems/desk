@@ -1,0 +1,305 @@
+# The claim window, in a repo a cold session can actually reach (#91).
+#
+# ── Why a SECOND copy of this door exists ────────────────────────────────────
+# The door itself is not new. `bounded-systems/.github` has carried
+# `claim-ticket.yml` since #252, and that file — not this one — is the design;
+# read its header for what a claim IS, why it fails closed, and what the rung on
+# the record means. This file is the same door behind a reachable handle.
+#
+# THE MEASURED GAP (`.github-private`#514, and desk#91). A session created
+# without `.github` attached cannot claim, because it cannot dispatch a workflow
+# that lives in `.github`, and it cannot attach it mid-session either:
+# `add_repo` refuses dot-prefixed names on hidden-path grounds. Every other link
+# in the cold-start chain already works — the boot digest resolves from the
+# channel manifest, the payload verifies, the org context is served publicly,
+# the ceremony client is fetchable with no credential, the keeper is reachable,
+# and the public board is published. The claim was the one step that needed a
+# repo a session could not have. Today's prx#434 worker demonstrated it exactly:
+# it minted nothing and waited for a session that HAD `.github` to dispatch the
+# claim on its behalf.
+#
+# `desk` is an ordinary repo name, so `add_repo` attaches it mid-session. That
+# is the entire reason this file is here and not somewhere tidier.
+# `.github-private`#697 records the owner's direction that core infra should not
+# live in dot-named repos; this is the smallest instance of it that closes cold
+# start.
+#
+# ── THE VERIFICATION CODE IS NOT COPIED ──────────────────────────────────────
+# `claim-authorization.mjs` and `claim-digest.mjs` come from a CHECKOUT of
+# `bounded-systems/.github` at the SHA pinned below, never a vendored copy. The
+# hazard of vendoring is silent divergence and this org has already paid for it:
+# `.github`#310's vendored verifier kept a pre-#706 rung classification for five
+# days and nothing went red, because the copy was dead code nothing imported.
+# A second copy of the DIGEST FORMAT would be worse than that — the format is
+# what the human's passkey signed, so a drifted copy does not fail loudly, it
+# grades a signature against bytes nobody agreed to.
+#
+# Two doors sharing one verifier is the property to protect. What is duplicated
+# here is the plumbing (inputs, preflight, the mint, the gh calls); what is
+# emphatically not is the thing that decides whether an authorization is good.
+#
+# ── WHAT THIS COPY INHERITS, stated rather than discovered later ─────────────
+# THE RACE SERIALIZER HAS NEVER COVERED EVERY DOOR, and this file does not
+# change that — it is the third door to sit behind the same gap, not the one
+# that opens it. Look for no regression in this diff; there is none to find.
+#
+# `concurrency` groups are scoped per REPOSITORY. That alone means no pair of
+# doors in different repos has ever serialized against another, and the two that
+# already existed do not even produce the same group STRING: `claim-ticket.yml`
+# in `.github` groups on `claim-${{ inputs.repo }}-${{ inputs.issue }}` (a plain
+# repo name), while `_claim.yml` behind `.github-private`'s `claim.yml` groups on
+# `claim-${{ github.repository }}-${{ inputs.issue }}` (an owner/repo pair, and
+# the CALLER's at that). Two doors, two group namespaces, no serialization
+# between them — measured, not inferred.
+#
+# So the group below serializes runs of THIS file against each other and nothing
+# else, exactly as its two predecessors do. Two claims for one issue dispatched
+# at two doors at the same moment can both read the issue as unclaimed before
+# either writes, and both finish green. What this PR widens is the OVERLAP: the
+# pre-existing pair could collide only on a `.github-private` issue, and this
+# door covers every repo, as `.github`'s copy does.
+#
+# WHAT DOES NOT SAVE IT, and this is the part worth being exact about: the
+# read-back at the end of the claim step asserts that A claim is recorded, not
+# that THIS run's is. The label add is idempotent, so under a genuine race both
+# racers re-read a label, both find one, and both report success. The check is
+# honest about what it checks — that the record is READABLE rather than that the
+# writes returned 2xx — but it is not an ownership test and must not be read as
+# one.
+#
+# What a race therefore produces is TWO claim comments on one issue, each
+# truthful about itself: a visible mess rather than a silent one. The repair is
+# to assert SOLE ownership (re-read the claim comments, order by `created_at`
+# then comment id, withdraw if the earliest is not your claimant), which is
+# deterministic and works across doors and repos — written up as
+# `bounded-systems/.github`#402, together with extracting this record logic into
+# a `_claim-ticket.yml` reusable so it stops being copied at all. Neither is
+# implemented here. Until then the honest reading is that this window excludes
+# reliably against callers using the SAME door and best-effort against a caller
+# using another.
+#
+# ── The identity, and why this run may fail at the mint ──────────────────────
+# `front-desk-claim` is a broker entry pinned by OIDC subject, and the subject
+# is `job_workflow_ref` — ONE workflow FILE at ONE REF. `.github`'s copy is a
+# different file at a different ref, so its entry does not cover this one.
+# Until the broker registry carries an entry for THIS ref, the mint fails at
+# `require:` naming the gap and which of the two places fixes it. That is the
+# intended arrival state, not a bug here — the same state `.github`'s own copy
+# shipped in.
+name: claim-ticket
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repository name in bounded-systems (e.g. infra)"
+        required: true
+        type: string
+      issue:
+        description: "Issue number to claim"
+        required: true
+        type: string
+      claimant:
+        description: "Who is claiming — a session URL, branch name, or handle"
+        required: true
+        type: string
+      human_authorization:
+        description: >-
+          REQUIRED (#264). An authorization token from the keeper — base64url of
+          {authorizationId, nonce, issuedAt}. Get one by running `node claim-ceremony.mjs`
+          with CLAIM_REPO/CLAIM_ISSUE/CLAIMANT/KEEPER_URL set and approving with a passkey;
+          it prints the token on stdout. ABSENT IS A RED RUN, and so is present-and-
+          unverifiable — there is no green path that skips the ceremony. Note the
+          keeper sets the window per request type and a claim's may be as short as
+          two minutes, so fetch the token immediately before dispatching, not ahead
+          of time. See claim-authorization.mjs.
+        required: true
+        type: string
+
+# The org default. The one job below adds `id-token: write` for the mint and
+# nothing else — narrower than `.github`'s copy, which grants both at the top.
+permissions:
+  contents: read
+
+# THE serializer — and read "what this copy weakens" above for the half of the
+# race it no longer covers. Never cancel a run that has started: a claim
+# half-recorded then killed is the worst of both worlds.
+concurrency:
+  group: claim-${{ inputs.repo }}-${{ inputs.issue }}
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout of the pinned .github, for the verifier
+      id-token: write # OIDC → cf-token-broker, for the mint below
+    steps:
+      # Inputs land in URL paths below; refuse anything path-shaped rather than
+      # escaping it. Broker unset is a red run, not a skip — fail-closed, unlike
+      # front-desk-add, for the reason the header gives.
+      - name: Preflight — inputs are well-formed and the broker is configured
+        env:
+          REPO: ${{ inputs.repo }}
+          ISSUE: ${{ inputs.issue }}
+          BROKER: ${{ vars.CF_BROKER_URL }}
+        run: |
+          set -euo pipefail
+          case "$REPO" in
+            (*[!A-Za-z0-9._-]*|"") echo "::error::repo '$REPO' is not a plain repository name"; exit 1 ;;
+          esac
+          case "$ISSUE" in
+            (*[!0-9]*|"") echo "::error::issue '$ISSUE' is not a number"; exit 1 ;;
+          esac
+          if [ -z "$BROKER" ]; then
+            echo "::error::CF_BROKER_URL is unset — the window cannot mint a claim identity." \
+              "This run proves nothing about the ticket. Claim by hand instead:" \
+              "assign yourself and comment on bounded-systems/$REPO#$ISSUE, and say the window was down."
+            exit 1
+          fi
+
+      # THE VERIFIER, FETCHED NOT VENDORED — see the header. This repo's own code
+      # is never checked out and never runs here: the door executes exactly the
+      # bytes `bounded-systems/.github` carries at the pinned SHA, which is what
+      # lets two doors share one definition of what an authorization proves.
+      #
+      # THE SHA IS THE SAME CONSTANT AS THE ACTION PIN BELOW, and the test
+      # `test/claim-door.test.mjs` fails if the two ever differ. Dependabot bumps
+      # a `uses:` pin and cannot see a `ref:`, so without that guard a routine
+      # bump would split the verifier from the action and nothing would say so.
+      - name: Check out the pinned verifier from bounded-systems/.github
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: bounded-systems/.github
+          ref: a0330aea1a9fc899ff1002bf52d20ef8d9b2edad
+          path: .dotgithub
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      # ── THE AUTHORIZATION LEG (.github-private#642) ──────────────────────────
+      #
+      # BEFORE the mint and before any write, because a token that does not verify
+      # must stop the run while the ticket is still untouched. A check after the
+      # claim was recorded would be a report, not a gate.
+      #
+      # Since #264 this step decides WHETHER THE CLAIM HAPPENS, not merely which
+      # rung the record may name. Two outcomes:
+      #
+      #   token verifies at human-authorized or higher → green, credential named
+      #   anything else, INCLUDING NO TOKEN            → RED, naming the property
+      #                                                  that failed
+      #
+      # THE KEEPER URL IS A LITERAL, NOT A VARIABLE (#253). It was `vars.KEEPER_URL`
+      # when #252 landed, which made the input inert until someone clicked a setting.
+      # A literal needs no grant and no click, and it can only change through a
+      # reviewed diff — which is the property the surrounding work exists to enforce.
+      #
+      # THE THREE CLAIM VALUES COME FROM THIS DOOR'S OWN INPUTS, never from the
+      # token: the token contributes only the anti-replay values. That is the one
+      # property the whole authorization leg exists to protect, and
+      # `.github`'s claim-authorization.test.mjs asserts these exact three lines
+      # against its own copy of the workflow — so keep them spelled this way.
+      - name: Verify the human authorization, and say which rung it proved
+        id: authorization
+        working-directory: .dotgithub
+        env:
+          CLAIM_REPO: ${{ inputs.repo }}
+          CLAIM_ISSUE: ${{ inputs.issue }}
+          CLAIMANT: ${{ inputs.claimant }}
+          HUMAN_AUTHORIZATION: ${{ inputs.human_authorization }}
+          KEEPER_URL: "https://keeper.bounded.tools"
+          DISPATCHER: ${{ github.actor }}
+        run: node claim-authorization.mjs
+
+      # The action lives in `.github` (public, so a public consumer can resolve
+      # it — see its README) and is pinned to the same SHA as the checkout above.
+      - name: Mint the claim identity via the OIDC broker
+        id: app-token
+        uses: bounded-systems/.github/.github/actions/broker-gh-token@a0330aea1a9fc899ff1002bf52d20ef8d9b2edad
+        with:
+          app: front-desk-claim
+          broker-url: ${{ vars.CF_BROKER_URL }}
+          # The only scope this job uses: labels and comments are both issue
+          # operations. No contents, no projects — the board reflects claims via
+          # its own sweep; this window records them.
+          require: issues
+      - name: Claim, or fail naming the holder
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ inputs.repo }}
+          ISSUE: ${{ inputs.issue }}
+          CLAIMANT: ${{ inputs.claimant }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AUTHORIZATION: ${{ steps.authorization.outputs.authorization }}
+          RUNG: ${{ steps.authorization.outputs.rung }}
+        run: |
+          set -euo pipefail
+          api="repos/bounded-systems/$REPO/issues/$ISSUE"
+          issue="$(gh api "$api")"
+
+          state="$(jq -r '.state' <<<"$issue")"
+          if [ "$state" != "open" ]; then
+            echo "::error::bounded-systems/$REPO#$ISSUE is $state — nothing to claim"
+            exit 1
+          fi
+
+          # ANY assignee or the label counts — see "What a claim IS" above.
+          assignees="$(jq -r '[.assignees[].login] | join(", ")' <<<"$issue")"
+          labelled="$(jq -r '[.labels[].name] | contains(["claimed"])' <<<"$issue")"
+          if [ -n "$assignees" ] || [ "$labelled" = "true" ]; then
+            holder="${assignees:-the \`claimed\` label (see the claim comment on the issue)}"
+            echo "::error title=claim-ticket: already claimed::bounded-systems/$REPO#$ISSUE" \
+              "is held by $holder. Do NOT start work — read the issue and coordinate there."
+            echo "❌ **Not claimed** — bounded-systems/$REPO#$ISSUE is held by $holder." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # Create the label deliberately rather than leaning on any add-time
+          # auto-create behaviour — a claim must not depend on an undocumented
+          # side effect.
+          if ! gh api "repos/bounded-systems/$REPO/labels/claimed" >/dev/null 2>&1; then
+            gh api -X POST "repos/bounded-systems/$REPO/labels" \
+              -f name=claimed -f color=1d76db \
+              -f description="Held by an agent or human — see the claim comment. Remove to release." \
+              >/dev/null
+          fi
+
+          gh api -X POST "$api/labels" -f 'labels[]=claimed' >/dev/null
+
+          # Name the dispatcher alongside the claimant: the fallback door
+          # (claim-relay, .github-private#532) already records both, and the
+          # stronger door must not leave the weaker record. Record parity, not
+          # attribution — github.actor is owner-grade identity and cannot name
+          # a guest (.github-private#537, #558).
+          #
+          # $AUTHORIZATION is the rung this run actually proved, PLUS the reasons
+          # it is not higher. Both halves, always: a rung with no reasons is a
+          # verdict nobody can check, and .github-private/docs/claim-boundary.md
+          # P4 is specifically about mechanisms that are named but do not resolve.
+          # When a token verified, it also carries the claim-request digest the
+          # passkey signed (infra#501) — this comment is workflow-authored, so
+          # the approver can compare it against the keeper's approval page
+          # without trusting the keeper's own rendering of itself.
+          body="$(printf '🎫 **Claimed** by %s — dispatched by `%s` — [run](%s)\n\n%s\n\n<!-- claim-ticket -->\nRelease by removing the `claimed` label (and unassigning) if work stops without a merged PR.' \
+            "$CLAIMANT" "$ACTOR" "$RUN_URL" "$AUTHORIZATION")"
+          gh api -X POST "$api/comments" -f body="$body" >/dev/null
+
+          # Projection only — most dispatchers are bots and not assignable, and
+          # the claim above is already recorded either way.
+          gh api -X POST "$api/assignees" -f "assignees[]=$ACTOR" >/dev/null 2>&1 \
+            || echo "assignee projection skipped — '$ACTOR' is not assignable on $REPO"
+
+          # The fail-closed backstop: green means the record is READABLE, not
+          # that the writes returned 2xx.
+          after="$(gh api "$api")"
+          if [ "$(jq -r '[.labels[].name] | contains(["claimed"])' <<<"$after")" != "true" ]; then
+            echo "::error::the claim did not record on bounded-systems/$REPO#$ISSUE — treat as NOT claimed"
+            exit 1
+          fi
+
+          echo "✅ **Claimed** bounded-systems/$REPO#$ISSUE for \`$CLAIMANT\` — authorization: \`$RUNG\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "claimed: bounded-systems/$REPO#$ISSUE by $CLAIMANT ($RUNG)"
