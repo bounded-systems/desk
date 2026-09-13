@@ -79,6 +79,13 @@ export const NOTIFY_WORKFLOW_REFS = [
   // say THAT an approval is waiting and point at the keeper, and can point
   // nowhere else.
   "bounded-systems/.github/.github/workflows/announce-ceremony.yml@refs/heads/main",
+  // desk's own copy of that lane (desk#91/#92). A cold session — one created
+  // without `.github` attached, which `add_repo` cannot repair for a dot-prefixed
+  // name — can reach THIS repo's lane and no other, so the announce it dispatches
+  // arrives from here. A second entry rather than a rewrite of the line above:
+  // both lanes are live, and infra#526's rule is unchanged — a workflowRef pins
+  // ONE workflow, so each caller is its own entry.
+  "bounded-systems/desk/.github/workflows/announce-ceremony.yml@refs/heads/main",
   "bounded-systems/infra/.github/workflows/boot-deploy.yml@refs/heads/main",
   "bounded-systems/infra/.github/workflows/broker-deploy.yml@refs/heads/main",
   "bounded-systems/infra/.github/workflows/create-app.yml@refs/heads/main",
