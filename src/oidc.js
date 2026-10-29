@@ -122,6 +122,13 @@ export const NOTIFY_WORKFLOW_REFS = [
   "bounded-systems/.github-private/.github/workflows/org-baseline.yml@refs/heads/main",
   "bounded-systems/.github-private/.github/workflows/org-sync.yml@refs/heads/main",
   "bounded-systems/.github-private/.github/workflows/reroll-claude-harness.yml@refs/heads/main",
+
+  // infra's three Worker lanes for bdelanghe/home's Workers and the sealed drop
+  // (infra#670, desk#96). Each opens a keeper ceremony before any credential;
+  // without these entries its approval notice 403s and no phone rings.
+  "bounded-systems/infra/.github/workflows/trmnl-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/hooks-deploy.yml@refs/heads/main",
+  "bounded-systems/infra/.github/workflows/drop-deploy.yml@refs/heads/main",
 ];
 
 /** Kept for callers that want the projection specifically. */
