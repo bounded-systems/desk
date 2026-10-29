@@ -26,6 +26,17 @@ test("EVERY pinned lane is accepted, not just the first", async () => {
   }
 });
 
+test("infra's Worker lanes (trmnl, hooks, drop) are on the list (desk#96)", () => {
+  // Named rather than counted: these three were added together for infra#670, and
+  // the loop above proves each one verifies; this proves none was dropped.
+  for (const lane of ["trmnl-deploy.yml", "hooks-deploy.yml", "drop-deploy.yml"]) {
+    assert.ok(
+      NOTIFY_WORKFLOW_REFS.includes(`bounded-systems/infra/.github/workflows/${lane}@refs/heads/main`),
+      `${lane} must be able to send its approval notice`,
+    );
+  }
+});
+
 test("a lane infra was NOT granted is refused, however close its name", async () => {
   // infra#526's rule stated as a test. SEVEN infra lanes are pinned; the other
   // twenty-three are not, and there is no prefix, wildcard, or repository-level
