@@ -206,11 +206,20 @@ jobs:
           echo "✓ authorized by $person (credential $cred)"
 
       - name: Close the ceremony notification
-        if: ${{ steps.ceremony.outputs.issue_url != '' }}
+        if: ${{ always() && steps.ceremony.outputs.issue_url != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_URL: ${{ steps.ceremony.outputs.issue_url }}
-        run: gh issue close "$ISSUE_URL" --comment "Authorized by Face ID; ceremony complete." || true
+          JOB_STATUS: ${{ job.status }}
+        # ALWAYS, so a lapsed, refused or cancelled ceremony closes its issue too
+        # (same fix as bounded-systems/infra#687).
+        run: |
+          if [ "$JOB_STATUS" = success ]; then
+            msg="Authorized by Face ID; ceremony complete."
+          else
+            msg="Closed: this run ended ($JOB_STATUS) without a redeemed Face ID. Nothing was minted on its authority."
+          fi
+          gh issue close "$ISSUE_URL" --comment "$msg" || true
 
 
       - name: Mint the deploy token (via OIDC broker /deploy/desk)
